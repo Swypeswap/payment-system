@@ -1,0 +1,595 @@
+import { createHash } from "node:crypto";
+import bcrypt from "bcryptjs";
+import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
+import {
+  NOTIFICATION_KINDS,
+  encryptSecret,
+  parseSecretKey,
+  validateSolanaWalletAddress
+} from "@payment/shared";
+import { z } from "zod";
+import { audit } from "./audit.js";
+import { db, unwrap } from "./db.js";
+import { env } from "./env.js";
+import { encryptWebhookUrl, listRedactedRoutes, sendWebhook } from "./notifications.js";
+import { createSessionToken, dashboardCookie, isValidSession } from "./session.js";
+
+const uuid = z.string().uuid();
+const optionalNumber = z.number().nonnegative().nullable().optional();
+const percent = z.number().min(0).max(100);
+
+function parseDomain(value: string): string {
+  let domain = value.trim().toLowerCase();
+  if (!domain) {
+    throw new Error("Domain cannot be empty");
+  }
+  if (domain.includes("://")) {
+    domain = new URL(domain).hostname;
+  }
+  domain = domain.replace(/\/.*$/, "").replace(/\.$/, "");
+  if (!/^(?=.{1,253}$)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/.test(domain)) {
+    throw new Error(`Invalid domain: ${value}`);
+  }
+  return domain;
+}
+
+function getHeliusSignature(payload: Record<string, unknown>): string | undefined {
+  if (typeof payload.signature === "string") {
+    return payload.signature;
+  }
+  const events = payload.events as Record<string, Record<string, unknown>> | undefined;
+  for (const event of Object.values(events ?? {})) {
+    if (typeof event.signature === "string") {
+      return event.signature;
+    }
+  }
+  return undefined;
+}
+
+function heliusEventKey(payload: Record<string, unknown>, index: number): string {
+  const signature = getHeliusSignature(payload);
+  if (signature) {
+    return `helius:${signature}`;
+  }
+  return `helius:${createHash("sha256")
+    .update(`${index}:${JSON.stringify(payload)}`)
+    .digest("hex")}`;
+}
+
+async function requireDashboard(request: FastifyRequest, reply: FastifyReply) {
+  const token = request.cookies[dashboardCookie.name];
+  if (!(await isValidSession(token))) {
+    return reply.code(401).send({ error: "Authentication required" });
+  }
+
+  if (request.method !== "GET" && request.method !== "HEAD") {
+    const origin = request.headers.origin;
+    if (origin) {
+      const expected = env.PUBLIC_BASE_URL ?? `${request.protocol}://${request.headers.host}`;
+      if (origin !== expected) {
+        return reply.code(403).send({ error: "Origin check failed" });
+      }
+    }
+  }
+}
+
+async function updateTeamWallet(
+  teamId: string,
+  address: string,
+  actorType: "dashboard" | "discord",
+  actorId: string
+) {
+  const wallet = validateSolanaWalletAddress(address);
+  const team = unwrap(
+    await db.from("teams").select("manager_wallet_address").eq("id", teamId).single()
+  );
+  unwrap(
+    await db
+      .from("teams")
+      .update({ manager_wallet_address: wallet })
+      .eq("id", teamId)
+      .select("id")
+      .single()
+  );
+  unwrap(
+    await db
+      .from("wallet_update_history")
+      .insert({
+        team_id: teamId,
+        old_wallet_address: team.manager_wallet_address,
+        new_wallet_address: wallet,
+        actor_type: actorType,
+        actor_id: actorId
+      })
+      .select("id")
+      .single()
+  );
+  return wallet;
+}
+
+export async function registerRoutes(app: FastifyInstance) {
+  app.post(
+    "/api/login",
+    { config: { rateLimit: { max: 8, timeWindow: "1 minute" } } },
+    async (request, reply) => {
+      const { password } = z.object({ password: z.string().min(1) }).parse(request.body);
+      if (!(await bcrypt.compare(password, env.DASHBOARD_PASSWORD_HASH))) {
+        return reply.code(401).send({ error: "Invalid password" });
+      }
+      const token = await createSessionToken();
+      reply.setCookie(dashboardCookie.name, token, dashboardCookie.options);
+      return { ok: true };
+    }
+  );
+
+  app.post("/api/logout", async (_request, reply) => {
+    reply.clearCookie(dashboardCookie.name, { path: "/" });
+    return { ok: true };
+  });
+
+  app.post("/webhooks/helius", async (request, reply) => {
+    if (request.headers.authorization !== env.HELIUS_WEBHOOK_AUTH) {
+      return reply.code(401).send({ error: "Unauthorized" });
+    }
+    const deliveries = z.array(z.record(z.unknown())).parse(request.body);
+    if (deliveries.length === 0) {
+      return reply.send({ ok: true });
+    }
+    const rows = deliveries.map((payload, index) => ({
+      provider: "helius",
+      provider_event_key: heliusEventKey(payload, index),
+      signature: getHeliusSignature(payload),
+      payload
+    }));
+    const { error } = await db.from("chain_events").upsert(rows, {
+      onConflict: "provider_event_key",
+      ignoreDuplicates: true
+    });
+    if (error) {
+      request.log.error(error, "Could not enqueue Helius deliveries");
+      return reply.code(500).send({ error: "Could not enqueue deliveries" });
+    }
+    return { ok: true };
+  });
+
+  app.register(async (protectedApi) => {
+    protectedApi.addHook("preHandler", requireDashboard);
+
+    protectedApi.get("/api/bootstrap", async () => {
+      const [
+        settings,
+        teams,
+        managers,
+        wallets,
+        domains,
+        websites,
+        requests,
+        deposits,
+        swaps,
+        payouts,
+        auditLogs,
+        walletHistory,
+        routes
+      ] = await Promise.all([
+        db.from("app_settings").select("*").eq("id", true).single(),
+        db
+          .from("teams")
+          .select("*,team_managers(manager_id,managers(id,display_name,discord_user_id,discord_username,active))")
+          .order("name"),
+        db.from("managers").select("*").order("display_name"),
+        db.from("revenue_wallets").select("id,label,address,active,created_at,updated_at").order("label"),
+        db.from("domains").select("*").order("domain"),
+        db
+          .from("websites")
+          .select("*,domains(domain,status),teams(name,manager_wallet_address,payout_discord_channel_id),revenue_wallets(label,address)")
+          .order("created_at", { ascending: false }),
+        db.from("website_requests").select("*,teams(name)").order("created_at", { ascending: false }).limit(50),
+        db.from("deposits").select("*,websites(domains(domain)),revenue_wallets(address)").order("created_at", { ascending: false }).limit(50),
+        db.from("swap_attempts").select("*,websites(domains(domain))").order("created_at", { ascending: false }).limit(50),
+        db.from("payout_attempts").select("*,websites(domains(domain))").order("created_at", { ascending: false }).limit(50),
+        db.from("audit_logs").select("*").order("created_at", { ascending: false }).limit(100),
+        db.from("wallet_update_history").select("*,teams(name)").order("created_at", { ascending: false }).limit(50),
+        listRedactedRoutes()
+      ]);
+
+      return {
+        settings: unwrap(settings),
+        teams: unwrap(teams),
+        managers: unwrap(managers),
+        wallets: unwrap(wallets),
+        domains: unwrap(domains),
+        websites: unwrap(websites),
+        websiteRequests: unwrap(requests),
+        deposits: unwrap(deposits),
+        swaps: unwrap(swaps),
+        payouts: unwrap(payouts),
+        auditLogs: unwrap(auditLogs),
+        walletHistory: unwrap(walletHistory),
+        notificationRoutes: routes
+      };
+    });
+
+    protectedApi.put("/api/settings", async (request) => {
+      const values = z
+        .object({
+          global_threshold_usd: z.number().positive(),
+          global_manager_percent: percent,
+          global_company_percent: percent,
+          global_sol_reserve: z.number().nonnegative(),
+          min_swap_usd: z.number().nonnegative(),
+          max_price_impact_pct: z.number().nonnegative(),
+          min_organic_score: percent,
+          swaps_enabled: z.boolean(),
+          live_payouts_enabled: z.boolean(),
+          emergency_paused: z.boolean(),
+          discord_manager_role_ids: z.array(z.string().regex(/^[0-9]{15,22}$/)),
+          discord_staff_role_ids: z.array(z.string().regex(/^[0-9]{15,22}$/))
+        })
+        .parse(request.body);
+      if (values.global_manager_percent + values.global_company_percent !== 100) {
+        throw new Error("Global payout percentages must add up to 100");
+      }
+      const data = unwrap(
+        await db.from("app_settings").update(values).eq("id", true).select("*").single()
+      );
+      await audit("settings.updated", "app_settings", "true", {
+        emergency_paused: values.emergency_paused,
+        swaps_enabled: values.swaps_enabled,
+        live_payouts_enabled: values.live_payouts_enabled
+      });
+      return data;
+    });
+
+    protectedApi.post("/api/domains/import", async (request) => {
+      const { domains } = z.object({ domains: z.string().min(1) }).parse(request.body);
+      const parsed = [...new Set(domains.split(/[,\n]/).map((value) => value.trim()).filter(Boolean).map(parseDomain))];
+      const { error } = await db
+        .from("domains")
+        .upsert(parsed.map((domain) => ({ domain })), {
+          onConflict: "domain",
+          ignoreDuplicates: true
+        });
+      if (error) throw new Error(error.message);
+      await audit("domains.imported", "domains", undefined, { count: parsed.length });
+      return { imported: parsed.length };
+    });
+
+    protectedApi.delete("/api/domains/:id", async (request) => {
+      const { id } = z.object({ id: uuid }).parse(request.params);
+      unwrap(
+        await db.from("domains").update({ status: "archived" }).eq("id", id).select("id").single()
+      );
+      await audit("domain.archived", "domain", id);
+      return { ok: true };
+    });
+
+    protectedApi.post("/api/managers", async (request) => {
+      const values = z
+        .object({
+          display_name: z.string().trim().min(1),
+          discord_user_id: z.string().regex(/^[0-9]{15,22}$/),
+          discord_username: z.string().trim().optional()
+        })
+        .parse(request.body);
+      const data = unwrap(await db.from("managers").insert(values).select("*").single());
+      await audit("manager.created", "manager", data.id);
+      return data;
+    });
+
+    protectedApi.delete("/api/managers/:id", async (request) => {
+      const { id } = z.object({ id: uuid }).parse(request.params);
+      unwrap(
+        await db.from("managers").update({ active: false }).eq("id", id).select("id").single()
+      );
+      await audit("manager.archived", "manager", id);
+      return { ok: true };
+    });
+
+    protectedApi.post("/api/teams", async (request) => {
+      const values = z
+        .object({
+          name: z.string().trim().min(1),
+          manager_wallet_address: z.string().optional(),
+          payout_discord_channel_id: z.string().regex(/^[0-9]{15,22}$/).optional(),
+          payout_message: z.string().trim().min(1).optional()
+        })
+        .parse(request.body);
+      const insert = {
+        ...values,
+        manager_wallet_address: values.manager_wallet_address
+          ? validateSolanaWalletAddress(values.manager_wallet_address)
+          : null
+      };
+      const data = unwrap(await db.from("teams").insert(insert).select("*").single());
+      await audit("team.created", "team", data.id);
+      return data;
+    });
+
+    protectedApi.put("/api/teams/:id", async (request) => {
+      const { id } = z.object({ id: uuid }).parse(request.params);
+      const values = z
+        .object({
+          name: z.string().trim().min(1).optional(),
+          manager_wallet_address: z.string().optional(),
+          payout_discord_channel_id: z.string().regex(/^[0-9]{15,22}$/).nullable().optional(),
+          payout_message: z.string().trim().min(1).optional(),
+          active: z.boolean().optional()
+        })
+        .parse(request.body);
+      const wallet = values.manager_wallet_address;
+      const update = { ...values };
+      delete update.manager_wallet_address;
+      if (Object.keys(update).length) {
+        unwrap(await db.from("teams").update(update).eq("id", id).select("id").single());
+      }
+      if (wallet) {
+        await updateTeamWallet(id, wallet, "dashboard", "shared-staff-account");
+      }
+      await audit("team.updated", "team", id);
+      return { ok: true };
+    });
+
+    protectedApi.post("/api/teams/:id/managers", async (request) => {
+      const { id } = z.object({ id: uuid }).parse(request.params);
+      const { manager_id } = z.object({ manager_id: uuid }).parse(request.body);
+      unwrap(
+        await db
+          .from("team_managers")
+          .upsert({ team_id: id, manager_id }, { onConflict: "team_id,manager_id" })
+          .select("*")
+          .single()
+      );
+      await audit("team.manager_assigned", "team", id, { manager_id });
+      return { ok: true };
+    });
+
+    protectedApi.delete("/api/teams/:teamId/managers/:managerId", async (request) => {
+      const { teamId, managerId } = z
+        .object({ teamId: uuid, managerId: uuid })
+        .parse(request.params);
+      const { error } = await db
+        .from("team_managers")
+        .delete()
+        .eq("team_id", teamId)
+        .eq("manager_id", managerId);
+      if (error) throw new Error(error.message);
+      await audit("team.manager_removed", "team", teamId, { manager_id: managerId });
+      return { ok: true };
+    });
+
+    protectedApi.post("/api/wallets/import", async (request) => {
+      const { label, private_key } = z
+        .object({ label: z.string().trim().min(1), private_key: z.string().min(1) })
+        .parse(request.body);
+      const keypair = parseSecretKey(private_key);
+      const encrypted = encryptSecret(private_key.trim(), env.MASTER_ENCRYPTION_KEY);
+      const data = unwrap(
+        await db
+          .from("revenue_wallets")
+          .insert({
+            label,
+            address: keypair.publicKey.toBase58(),
+            encrypted_private_key: encrypted.ciphertext,
+            encryption_nonce: encrypted.nonce,
+            encryption_auth_tag: encrypted.authTag,
+            encryption_key_version: encrypted.keyVersion
+          })
+          .select("id,label,address,active,created_at")
+          .single()
+      );
+      await audit("revenue_wallet.imported", "revenue_wallet", data.id, {
+        address: data.address
+      });
+      return data;
+    });
+
+    protectedApi.delete("/api/wallets/:id", async (request) => {
+      const { id } = z.object({ id: uuid }).parse(request.params);
+      unwrap(
+        await db
+          .from("revenue_wallets")
+          .update({ active: false })
+          .eq("id", id)
+          .select("id")
+          .single()
+      );
+      await audit("revenue_wallet.archived", "revenue_wallet", id);
+      return { ok: true };
+    });
+
+    protectedApi.post("/api/websites", async (request) => {
+      const values = z
+        .object({
+          domain_id: uuid,
+          team_id: uuid,
+          revenue_wallet_id: uuid,
+          company_wallet_address: z.string(),
+          remarks: z.string().default(""),
+          threshold_usd: optionalNumber,
+          manager_percent: percent.nullable().optional(),
+          company_percent: percent.nullable().optional(),
+          sol_reserve: optionalNumber
+        })
+        .parse(request.body);
+      if (
+        (values.manager_percent === null || values.manager_percent === undefined) !==
+        (values.company_percent === null || values.company_percent === undefined)
+      ) {
+        throw new Error("Set both website payout percentages or leave both empty");
+      }
+      if (
+        values.manager_percent !== null &&
+        values.manager_percent !== undefined &&
+        values.company_percent !== null &&
+        values.company_percent !== undefined &&
+        values.manager_percent + values.company_percent !== 100
+      ) {
+        throw new Error("Website payout percentages must add up to 100");
+      }
+      const insert = {
+        ...values,
+        company_wallet_address: validateSolanaWalletAddress(values.company_wallet_address)
+      };
+      const data = unwrap(await db.from("websites").insert(insert).select("*").single());
+      unwrap(
+        await db
+          .from("domains")
+          .update({ status: "assigned" })
+          .eq("id", values.domain_id)
+          .select("id")
+          .single()
+      );
+      await audit("website.created", "website", data.id);
+      return data;
+    });
+
+    protectedApi.put("/api/websites/:id", async (request) => {
+      const { id } = z.object({ id: uuid }).parse(request.params);
+      const values = z
+        .object({
+          team_id: uuid.optional(),
+          revenue_wallet_id: uuid.optional(),
+          company_wallet_address: z.string().optional(),
+          hosted: z.boolean().optional(),
+          remarks: z.string().optional(),
+          threshold_usd: optionalNumber,
+          manager_percent: percent.nullable().optional(),
+          company_percent: percent.nullable().optional(),
+          sol_reserve: optionalNumber,
+          active: z.boolean().optional()
+        })
+        .parse(request.body);
+      if (
+        (values.manager_percent === null || values.manager_percent === undefined) !==
+        (values.company_percent === null || values.company_percent === undefined)
+      ) {
+        throw new Error("Set both website payout percentages or leave both empty");
+      }
+      if (
+        values.manager_percent !== null &&
+        values.manager_percent !== undefined &&
+        values.company_percent !== null &&
+        values.company_percent !== undefined &&
+        values.manager_percent + values.company_percent !== 100
+      ) {
+        throw new Error("Website payout percentages must add up to 100");
+      }
+      const previous = unwrap(
+        await db
+          .from("websites")
+          .select("hosted,team_id,domains(domain)")
+          .eq("id", id)
+          .single()
+      ) as { hosted: boolean; team_id: string; domains: { domain: string } };
+      const update = {
+        ...values,
+        company_wallet_address: values.company_wallet_address
+          ? validateSolanaWalletAddress(values.company_wallet_address)
+          : undefined
+      };
+      unwrap(await db.from("websites").update(update).eq("id", id).select("id").single());
+      await audit("website.updated", "website", id, values);
+      if (values.hosted === true && previous.hosted === false) {
+        await sendWebhook(
+          "website_activation",
+          {
+            content: "@everyone",
+            embeds: [
+              {
+                title: "Website activated",
+                color: 0x22c55e,
+                fields: [
+                  { name: "Domain", value: previous.domains.domain },
+                  { name: "Remarks", value: values.remarks || "No remarks" }
+                ]
+              }
+            ]
+          },
+          { teamId: values.team_id ?? previous.team_id, mentionEveryone: true }
+        );
+      }
+      return { ok: true };
+    });
+
+    protectedApi.delete("/api/websites/:id", async (request) => {
+      const { id } = z.object({ id: uuid }).parse(request.params);
+      const website = unwrap(
+        await db.from("websites").select("domain_id").eq("id", id).single()
+      );
+      unwrap(
+        await db
+          .from("websites")
+          .update({ active: false, hosted: false })
+          .eq("id", id)
+          .select("id")
+          .single()
+      );
+      unwrap(
+        await db
+          .from("domains")
+          .update({ status: "archived" })
+          .eq("id", website.domain_id)
+          .select("id")
+          .single()
+      );
+      await audit("website.archived", "website", id);
+      return { ok: true };
+    });
+
+    protectedApi.post("/api/notification-routes", async (request) => {
+      const values = z
+        .object({
+          kind: z.enum(NOTIFICATION_KINDS),
+          team_id: uuid.nullable().optional(),
+          name: z.string().trim().min(1),
+          webhook_url: z.string().url(),
+          enabled: z.boolean().default(true)
+        })
+        .parse(request.body);
+      const encrypted = encryptWebhookUrl(values.webhook_url);
+      const row = {
+        kind: values.kind,
+        team_id: values.team_id ?? null,
+        name: values.name,
+        enabled: values.enabled,
+        encrypted_webhook_url: encrypted.ciphertext,
+        encryption_nonce: encrypted.nonce,
+        encryption_auth_tag: encrypted.authTag,
+        encryption_key_version: encrypted.keyVersion
+      };
+      const data = unwrap(
+        await db
+          .from("notification_routes")
+          .upsert(row, { onConflict: "kind,team_id" })
+          .select("id,kind,team_id,name,enabled,updated_at")
+          .single()
+      );
+      await audit("notification_route.saved", "notification_route", data.id, {
+        kind: data.kind,
+        team_id: data.team_id
+      });
+      return data;
+    });
+
+    protectedApi.post("/api/notification-routes/:id/test", async (request) => {
+      const { id } = z.object({ id: uuid }).parse(request.params);
+      const route = unwrap(
+        await db.from("notification_routes").select("kind,team_id").eq("id", id).single()
+      );
+      const delivered = await sendWebhook(
+        route.kind,
+        { content: "Payment platform webhook test succeeded." },
+        { teamId: route.team_id ?? undefined }
+      );
+      return { delivered };
+    });
+
+    protectedApi.delete("/api/notification-routes/:id", async (request) => {
+      const { id } = z.object({ id: uuid }).parse(request.params);
+      const { error } = await db.from("notification_routes").delete().eq("id", id);
+      if (error) throw new Error(error.message);
+      await audit("notification_route.deleted", "notification_route", id);
+      return { ok: true };
+    });
+  });
+}

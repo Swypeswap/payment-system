@@ -1,0 +1,25 @@
+{
+  "name": "@payment/worker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "start": "tsx src/index.ts",
+    "register:discord": "tsx src/register-commands.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@payment/shared": "file:../../packages/shared",
+    "@solana/web3.js": "^1.98.4",
+    "@supabase/supabase-js": "^2.57.4",
+    "bs58": "^6.0.0",
+    "discord.js": "^14.22.1",
+    "zod": "^3.25.76"
+  },
+  "devDependencies": {
+    "@types/node": "^24.8.1",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.3"
+  }
+}

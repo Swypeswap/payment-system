@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Solana Payout Control</title>
+    <link rel="stylesheet" href="/styles.css" />
+    <script type="module" src="/app.js"></script>
+  </head>
+  <body>
+    <div class="shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <span class="brand-mark">S</span>
+          <div>
+            <strong>Solana Payout</strong>
+            <small>Control center</small>
+          </div>
+        </div>
+        <nav id="nav"></nav>
+        <button class="ghost logout" id="logout">Sign out</button>
+      </aside>
+      <main>
+        <header class="topbar">
+          <div>
+            <p class="eyebrow">OPERATIONS</p>
+            <h1 id="page-title">Overview</h1>
+          </div>
+          <div class="status-pill" id="system-status">Loading</div>
+        </header>
+        <div id="notice"></div>
+        <section id="content"></section>
+      </main>
+    </div>
+
+    <dialog id="login-dialog">
+      <form id="login-form" method="dialog" class="login-card">
+        <p class="eyebrow">PRIVATE DASHBOARD</p>
+        <h2>Staff access</h2>
+        <p>Enter the shared staff password to continue.</p>
+        <label>Password<input type="password" name="password" autocomplete="current-password" required /></label>
+        <button type="submit">Unlock dashboard</button>
+        <small id="login-error"></small>
+      </form>
+    </dialog>
+  </body>
+</html>

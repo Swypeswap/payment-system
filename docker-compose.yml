@@ -1,0 +1,35 @@
+services:
+  server:
+    build: .
+    restart: unless-stopped
+    env_file: ${ENV_FILE:-.env}
+    command: npm run start:server
+    expose:
+      - "3000"
+
+  worker:
+    build: .
+    restart: unless-stopped
+    env_file: ${ENV_FILE:-.env}
+    command: npm run start:worker
+    depends_on:
+      - server
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    environment:
+      DASHBOARD_DOMAIN: ${DASHBOARD_DOMAIN}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - server
+
+volumes:
+  caddy_data:
+  caddy_config:
