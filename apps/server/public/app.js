@@ -13,7 +13,7 @@ const nestedDomain = (record) => record?.websites?.domains?.domain ?? record?.do
 async function api(url, options = {}) {
   const response = await fetch(url, {
     ...options,
-    headers: { "content-type": "application/json", ...(options.headers || {}) }
+    headers: { ...(options.body === undefined ? {} : { "content-type": "application/json" }), ...(options.headers || {}) }
   });
   const body = await response.json().catch(() => ({}));
   if (response.status === 401) {
@@ -31,7 +31,7 @@ function notice(message, type = "success") {
 
 async function mutate(url, method, body) {
   try {
-    await api(url, { method, body: body ? JSON.stringify(body) : undefined });
+    await api(url, { method, body: body === undefined ? undefined : JSON.stringify(body) });
     notice("Saved successfully.");
     await load();
   } catch (error) {
