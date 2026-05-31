@@ -43,5 +43,20 @@
         <small id="login-error"></small>
       </form>
     </dialog>
+
+    <dialog id="assign-manager-dialog">
+      <form id="assign-manager-form" class="modal-card">
+        <p class="eyebrow">TEAM MANAGEMENT</p>
+        <h2>Assign manager</h2>
+        <p>Link a manager to <strong id="assign-manager-team"></strong>.</p>
+        <input type="hidden" name="team_id" />
+        <label>Manager<select name="manager_id" required></select></label>
+        <small id="assign-manager-empty"></small>
+        <div class="modal-actions">
+          <button type="button" class="ghost" id="assign-manager-cancel">Cancel</button>
+          <button type="submit" id="assign-manager-submit">Assign</button>
+        </div>
+      </form>
+    </dialog>
   </body>
 </html>

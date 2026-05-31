@@ -214,6 +214,23 @@ function data(form) {
 function optionalNumeric(value) { return value === "" ? null : Number(value); }
 function splitIds(value) { return value.split(",").map(v => v.trim()).filter(Boolean); }
 
+function openAssignManagerDialog(teamId) {
+  const team = state.teams.find((item) => item.id === teamId);
+  const assignedIds = new Set((team.team_managers || []).map((item) => item.manager_id));
+  const managers = state.managers.filter((item) => item.active && !assignedIds.has(item.id));
+  const dialog = $("#assign-manager-dialog");
+  const select = dialog.querySelector("[name=manager_id]");
+  const submit = $("#assign-manager-submit");
+
+  dialog.querySelector("[name=team_id]").value = team.id;
+  $("#assign-manager-team").textContent = team.name;
+  select.innerHTML = option(managers, "id", "display_name", managers.length ? "Choose manager" : "No managers available");
+  select.disabled = !managers.length;
+  submit.disabled = !managers.length;
+  $("#assign-manager-empty").textContent = managers.length ? "" : "Every active manager is already assigned to this team.";
+  dialog.showModal();
+}
+
 document.addEventListener("submit", async (event) => {
   event.preventDefault();
   const values = data(event.target);
@@ -224,6 +241,10 @@ document.addEventListener("submit", async (event) => {
   if (event.target.id === "domain-form") mutate("/api/domains/import", "POST", values);
   if (event.target.id === "manager-form") mutate("/api/managers", "POST", values);
   if (event.target.id === "team-form") mutate("/api/teams", "POST", Object.fromEntries(Object.entries(values).filter(([, v]) => v !== "")));
+  if (event.target.id === "assign-manager-form") {
+    $("#assign-manager-dialog").close();
+    mutate(`/api/teams/${values.team_id}/managers`, "POST", { manager_id: values.manager_id });
+  }
   if (event.target.id === "wallet-form") mutate("/api/wallets/import", "POST", values);
   if (event.target.id === "route-form") mutate("/api/notification-routes", "POST", { ...values, team_id: values.team_id || null, enabled: true });
   if (event.target.id === "website-form") mutate("/api/websites", "POST", {
@@ -257,11 +278,8 @@ document.addEventListener("click", async (event) => {
     const wallet = prompt("New manager payout wallet for this team:");
     if (wallet) mutate(`/api/teams/${button.dataset.teamWallet}`, "PUT", { manager_wallet_address: wallet });
   }
-  if (button.dataset.assignManager) {
-    const names = state.managers.filter(m => m.active).map(m => `${m.display_name}: ${m.id}`).join("\n");
-    const manager_id = prompt(`Paste the manager ID to assign:\n\n${names}`);
-    if (manager_id) mutate(`/api/teams/${button.dataset.assignManager}/managers`, "POST", { manager_id });
-  }
+  if (button.dataset.assignManager) openAssignManagerDialog(button.dataset.assignManager);
+  if (button.id === "assign-manager-cancel") $("#assign-manager-dialog").close();
   if (button.dataset.removeManager) {
     const team = state.teams.find(t => t.id === button.dataset.removeManager);
     const rows = (team.team_managers || []).map(item => `${item.managers?.display_name}: ${item.manager_id}`).join("\n");
