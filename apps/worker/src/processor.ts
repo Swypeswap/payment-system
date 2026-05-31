@@ -1,18 +1,18 @@
-import { createHash } from "node:crypto";
-import bs58 from "bs58";
+import { createHash, randomInt, randomUUID } from "node:crypto";
 import {
   LAMPORTS_PER_SOL,
   PAYOUT_FEE_BUFFER_LAMPORTS,
   WRAPPED_SOL_MINT,
   decryptSecret,
   effectiveWebsiteSettings,
+  grossUpPrivacyCashWithdrawal,
   parseSecretKey,
+  planPrivacyCashDistribution,
   validateSolanaWalletAddress
 } from "@payment/shared";
 import {
   Connection,
   PublicKey,
-  SystemProgram,
   Transaction,
   TransactionInstruction,
   sendAndConfirmTransaction,
@@ -28,7 +28,18 @@ import {
   getTokenInfo,
   signAndExecuteSwap
 } from "./jupiter.js";
-import { sendRoute, sendTeamPayoutMessage } from "./notifications.js";
+import {
+  sendManagerMessage,
+  sendOwnersMessage,
+  sendRoute,
+  sendTeamPayoutMessage
+} from "./notifications.js";
+import {
+  createPrivacyCashClient,
+  loadPrivacyCashFeeConfig,
+  type PrivacyCashAsset,
+  withPrivacyCashLease
+} from "./privacy-cash.js";
 
 const connection = new Connection(env.SOLANA_RPC_URL, "confirmed");
 const TOKEN_PROGRAM_ID = new PublicKey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA");
@@ -48,7 +59,7 @@ interface WebsiteRow {
   domain_id: string;
   team_id: string;
   revenue_wallet_id: string;
-  company_wallet_address: string;
+  company_wallet_address: string | null;
   hosted: boolean;
   active: boolean;
   threshold_usd: number | string | null;
@@ -169,6 +180,27 @@ async function quarantineToken(
       ]
     }]
   }, website.team_id);
+}
+
+async function sendLegacyPayoutNotifications(website: WebsiteRow, payout: Record<string, unknown>) {
+  try {
+    await sendRoute("payout", {
+      embeds: [{
+        title: "Legacy website payout sent",
+        color: 0x64f5b5,
+        fields: [
+          { name: "Website", value: website.domains.domain },
+          { name: "Team", value: website.teams.name },
+          { name: "Signature", value: String(payout.signature ?? "-") }
+        ]
+      }]
+    }, website.team_id);
+    await sendTeamPayoutMessage(website.teams);
+  } catch (error) {
+    await workerAudit("payout.notification_failed", "website", website.id, {
+      error: error instanceof Error ? error.message : String(error)
+    });
+  }
 }
 
 async function hasRecentTokenAttempt(website: WebsiteRow, token: TokenBalance) {
@@ -305,140 +337,276 @@ async function swapToken(
   });
 }
 
-async function sendPayoutNotifications(website: WebsiteRow, payout: Record<string, unknown>) {
-  try {
-    await sendRoute("payout", {
-      embeds: [{
-        title: "Website payout sent",
-        color: 0x64f5b5,
-        fields: [
-          { name: "Website", value: website.domains.domain },
-          { name: "Team", value: website.teams.name },
-          { name: "Manager share", value: `${Number(payout.manager_lamports) / LAMPORTS_PER_SOL} SOL` },
-          { name: "Company share", value: `${Number(payout.company_lamports) / LAMPORTS_PER_SOL} SOL` },
-          { name: "Signature", value: String(payout.signature ?? "-") }
-        ]
-      }]
-    }, website.team_id);
-    await sendTeamPayoutMessage(website.teams);
-  } catch (error) {
-    await workerAudit("payout.notification_failed", "website", website.id, {
-      error: error instanceof Error ? error.message : String(error)
-    });
-  }
+interface OwnerProfile {
+  id: string;
+  display_name: string;
+  discord_user_id: string;
+  solana_wallet_address: string | null;
 }
 
-async function payoutIfEligible(
+interface ShieldJob {
+  id: string;
+  website_id: string;
+  asset_key: PrivacyCashAsset;
+  shield_raw: string | number;
+  status?: "pending" | "processing";
+  private_balance_before_raw?: string | number | null;
+}
+
+interface PrivacyCashWithdrawalJob {
+  id: string;
+  payout_batch_id: string;
+  website_id: string;
+  asset_key: PrivacyCashAsset;
+  recipient_kind: "owner_1" | "owner_2" | "owner_3" | "manager";
+  recipient_wallet_address: string;
+  net_raw: string | number;
+}
+
+function displaySolAmount(raw: unknown) {
+  return `${Number(raw) / LAMPORTS_PER_SOL} SOL`;
+}
+
+function randomReleaseTime(minimumHours: number, maximumHours: number) {
+  const minimumSeconds = Math.ceil(minimumHours * 60 * 60);
+  const maximumSeconds = Math.floor(maximumHours * 60 * 60);
+  return new Date(Date.now() + randomInt(minimumSeconds, maximumSeconds + 1) * 1000).toISOString();
+}
+
+function randomLegWeights() {
+  return Array.from({ length: randomInt(2, 5) }, () => randomInt(80, 121));
+}
+
+async function loadOwnerProfiles() {
+  const owners = unwrap(
+    await db.from("owner_profiles").select("*").eq("active", true).order("created_at")
+  ) as OwnerProfile[];
+  if (owners.length !== 3 || owners.some((owner) => !owner.solana_wallet_address)) {
+    throw new Error("Configure exactly three active owner profiles with Solana wallets");
+  }
+  return owners.map((owner) => ({
+    ...owner,
+    solana_wallet_address: validateSolanaWalletAddress(owner.solana_wallet_address ?? "")
+  }));
+}
+
+async function planShieldedPayout(
   website: WebsiteRow,
-  signer: Keypair,
-  balanceLamports: bigint,
+  shieldJob: ShieldJob,
+  status: "dry_run" | "pending",
   settings: ReturnType<typeof effectiveWebsiteSettings>
 ) {
-  const reserveLamports = BigInt(Math.ceil(settings.solReserve * LAMPORTS_PER_SOL));
-  const available = balanceLamports - reserveLamports - BigInt(PAYOUT_FEE_BUFFER_LAMPORTS);
-  if (available <= 0n) return;
-
-  const solUsd = await getSolUsdPrice();
-  const availableUsd = Number(available) / LAMPORTS_PER_SOL * solUsd;
-  if (availableUsd < settings.thresholdUsd) return;
   if (!website.teams.manager_wallet_address) {
     throw new Error("Team manager payout wallet is not configured");
   }
   const managerWallet = validateSolanaWalletAddress(website.teams.manager_wallet_address);
-  const companyWallet = validateSolanaWalletAddress(website.company_wallet_address);
-  const managerLamports = available * BigInt(Math.round(settings.managerPercent * 10_000)) / 1_000_000n;
-  const companyLamports = available - managerLamports;
-  const dryRunKey = createHash("sha256")
-    .update(`dry:${website.id}:${balanceLamports}:${managerWallet}:${companyWallet}`)
-    .digest("hex");
-
-  if (!settings.livePayoutsEnabled || env.DRY_RUN) {
-    const { error } = await db.from("payout_attempts").upsert({
-      website_id: website.id,
-      revenue_wallet_id: website.revenue_wallet_id,
-      idempotency_key: dryRunKey,
-      manager_wallet_address: managerWallet,
-      company_wallet_address: companyWallet,
-      source_balance_lamports: balanceLamports.toString(),
-      reserve_lamports: reserveLamports.toString(),
-      manager_lamports: managerLamports.toString(),
-      company_lamports: companyLamports.toString(),
-      status: "dry_run",
-      error: env.DRY_RUN ? "DRY_RUN environment kill switch is enabled" : "Live payouts are disabled"
-    }, { onConflict: "idempotency_key", ignoreDuplicates: true });
-    if (error) throw new Error(error.message);
-    return;
+  const owners = await loadOwnerProfiles();
+  const feeConfig = await loadPrivacyCashFeeConfig();
+  let plan;
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    plan = planPrivacyCashDistribution(
+      BigInt(shieldJob.shield_raw),
+      feeConfig,
+      [randomLegWeights(), randomLegWeights(), randomLegWeights(), randomLegWeights()]
+    );
+    if (plan.withdrawals.every((withdrawal) =>
+      withdrawal.netLamports >= BigInt(feeConfig.minimumWithdrawalRaw)
+    )) {
+      break;
+    }
+    plan = undefined;
   }
-
-  const latest = await connection.getLatestBlockhash("confirmed");
-  const transaction = new Transaction({
-    feePayer: signer.publicKey,
-    blockhash: latest.blockhash,
-    lastValidBlockHeight: latest.lastValidBlockHeight
-  }).add(
-    SystemProgram.transfer({
-      fromPubkey: signer.publicKey,
-      toPubkey: new PublicKey(managerWallet),
-      lamports: toSafeLamports(managerLamports)
-    }),
-    SystemProgram.transfer({
-      fromPubkey: signer.publicKey,
-      toPubkey: new PublicKey(companyWallet),
-      lamports: toSafeLamports(companyLamports)
-    })
-  );
-  transaction.sign(signer);
-  if (!transaction.signature) throw new Error("Payout transaction was not signed");
-  const signature = bs58.encode(transaction.signature);
-  const raw = transaction.serialize();
-  unwrap(
+  if (!plan) {
+    throw new Error(`Shielded ${shieldJob.asset_key.toUpperCase()} balance is too small for randomized payout legs`);
+  }
+  const batch = unwrap(
     await db
-      .from("payout_attempts")
-      .insert({
+      .from("privacy_cash_payout_batches")
+      .upsert({
+        shield_job_id: shieldJob.id,
         website_id: website.id,
         revenue_wallet_id: website.revenue_wallet_id,
-        idempotency_key: signature,
+        team_id: website.team_id,
+        asset_key: shieldJob.asset_key,
         manager_wallet_address: managerWallet,
-        company_wallet_address: companyWallet,
-        source_balance_lamports: balanceLamports.toString(),
-        reserve_lamports: reserveLamports.toString(),
-        manager_lamports: managerLamports.toString(),
-        company_lamports: companyLamports.toString(),
-        signature,
-        raw_transaction_base64: raw.toString("base64"),
-        last_valid_block_height: latest.lastValidBlockHeight,
-        status: "submitted"
-      })
+        owner_wallet_addresses: owners.map((owner) => owner.solana_wallet_address),
+        shield_raw: String(shieldJob.shield_raw),
+        net_distribution_raw: plan.netDistributionLamports.toString(),
+        estimated_fee_raw: plan.estimatedFeeLamports.toString(),
+        dust_raw: plan.dustLamports.toString(),
+        status
+      }, { onConflict: "shield_job_id" })
       .select("*")
       .single()
   );
-  await connection.sendRawTransaction(raw, { skipPreflight: false, maxRetries: 3 });
-  const confirmation = await connection.confirmTransaction({
-    signature,
-    blockhash: latest.blockhash,
-    lastValidBlockHeight: latest.lastValidBlockHeight
-  }, "confirmed");
-  if (confirmation.value.err) {
+  const recipientFor = (kind: PrivacyCashWithdrawalJob["recipient_kind"]) => {
+    if (kind === "manager") {
+      return { key: `manager:${website.team_id}`, wallet: managerWallet, ownerId: null };
+    }
+    const ownerIndex = Number(kind.slice(-1)) - 1;
+    const owner = owners[ownerIndex];
+    if (!owner) throw new Error(`Owner profile missing for ${kind}`);
+    return { key: `owner:${owner.id}`, wallet: owner.solana_wallet_address, ownerId: owner.id };
+  };
+  const solUsd = await getSolUsdPrice();
+  const rows = plan.withdrawals.map((withdrawal) => {
+    const recipient = recipientFor(withdrawal.recipientKind);
+    return {
+      payout_batch_id: batch.id,
+      website_id: website.id,
+      team_id: website.team_id,
+      asset_key: shieldJob.asset_key,
+      recipient_kind: withdrawal.recipientKind,
+      recipient_key: recipient.key,
+      owner_profile_id: recipient.ownerId,
+      leg_index: withdrawal.legIndex,
+      recipient_wallet_address: recipient.wallet,
+      net_raw: withdrawal.netLamports.toString(),
+      gross_raw: withdrawal.grossLamports.toString(),
+      estimated_fee_raw: withdrawal.estimatedFeeLamports.toString(),
+      estimated_usd:
+        Number(withdrawal.netLamports) / LAMPORTS_PER_SOL * solUsd,
+      scheduled_for: randomReleaseTime(settings.privacyMinDelayHours, settings.privacyMaxDelayHours),
+      status
+    };
+  });
+  const { error } = await db
+    .from("privacy_cash_withdrawal_jobs")
+    .upsert(rows, { onConflict: "payout_batch_id,recipient_key,leg_index", ignoreDuplicates: true });
+  if (error) throw new Error(error.message);
+  await workerAudit("privacy_cash.payout_planned", "privacy_cash_payout_batch", batch.id, {
+    shield_job_id: shieldJob.id,
+    asset_key: shieldJob.asset_key,
+    net_distribution_raw: plan.netDistributionLamports.toString(),
+    estimated_fee_raw: plan.estimatedFeeLamports.toString(),
+    dust_raw: plan.dustLamports.toString(),
+    withdrawal_leg_count: rows.length,
+    status
+  });
+}
+
+async function privateBalanceRaw(signer: Keypair) {
+  const client = createPrivacyCashClient(signer);
+  return (await client.getPrivateBalance()).lamports;
+}
+
+async function executeShieldJob(signer: Keypair, shieldJob: ShieldJob) {
+  if (env.SOLANA_CLUSTER !== "mainnet-beta") {
+    throw new Error("Privacy Cash live transfers require SOLANA_CLUSTER=mainnet-beta");
+  }
+  return withPrivacyCashLease(async () => {
+    const client = createPrivacyCashClient(signer);
+    const balance = (await client.getPrivateBalance()).lamports;
     unwrap(
       await db
-        .from("payout_attempts")
-        .update({ status: "failed", error: JSON.stringify(confirmation.value.err) })
-        .eq("signature", signature)
+        .from("privacy_cash_shield_jobs")
+        .update({ status: "processing", private_balance_before_raw: String(balance), error: null })
+        .eq("id", shieldJob.id)
         .select("id")
         .single()
     );
-    throw new Error(`Payout transaction failed: ${JSON.stringify(confirmation.value.err)}`);
+    try {
+      const amount = toSafeLamports(BigInt(shieldJob.shield_raw));
+      const deposit = await client.deposit({ lamports: amount });
+      return unwrap(
+        await db
+          .from("privacy_cash_shield_jobs")
+          .update({ status: "succeeded", signature: deposit.tx, error: null })
+          .eq("id", shieldJob.id)
+          .select("*")
+          .single()
+      ) as ShieldJob;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      unwrap(
+        await db
+          .from("privacy_cash_shield_jobs")
+          .update({ status: "review_required", error: message })
+          .eq("id", shieldJob.id)
+          .select("id")
+          .single()
+      );
+      throw error;
+    }
+  });
+}
+
+async function shieldAssetIfEligible(
+  website: WebsiteRow,
+  signer: Keypair,
+  sourceBalanceRaw: bigint,
+  reserveRaw: bigint,
+  settings: ReturnType<typeof effectiveWebsiteSettings>
+) {
+  if (!settings.privacyCashEnabled) return;
+  const available = sourceBalanceRaw - reserveRaw;
+  if (available <= 0n) return;
+  const usd = Number(available) / LAMPORTS_PER_SOL * await getSolUsdPrice();
+  if (usd < settings.thresholdUsd) return;
+  if (!website.teams.manager_wallet_address) {
+    throw new Error("Team manager payout wallet is not configured");
   }
-  const payout = unwrap(
+  const managerWallet = validateSolanaWalletAddress(website.teams.manager_wallet_address);
+  const owners = await loadOwnerProfiles();
+  const isDryRun = !settings.livePayoutsEnabled || env.DRY_RUN;
+  if (!isDryRun) {
+    const unresolved = await db
+      .from("privacy_cash_shield_jobs")
+      .select("id,status")
+      .eq("website_id", website.id)
+      .in("status", ["pending", "processing", "review_required"])
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    if (unresolved.error) throw new Error(unresolved.error.message);
+    if (unresolved.data?.status === "review_required") {
+      throw new Error("Resolve the previous Privacy Cash shield job under manual review before shielding more funds");
+    }
+    if (unresolved.data) return;
+  }
+  const idempotencyKey = createHash("sha256")
+    .update(
+      isDryRun
+        ? `privacy-cash:dry-run:sol:${website.id}:${sourceBalanceRaw}:${managerWallet}:${owners.map((owner) => owner.solana_wallet_address).join(":")}`
+        : `privacy-cash:live:sol:${website.id}:${randomUUID()}`
+    )
+    .digest("hex");
+  const existing = await db
+    .from("privacy_cash_shield_jobs")
+    .select("id")
+    .eq("idempotency_key", idempotencyKey)
+    .maybeSingle();
+  if (existing.error) throw new Error(existing.error.message);
+  if (existing.data) return;
+
+  const shieldJob = unwrap(
     await db
-      .from("payout_attempts")
-      .update({ status: "succeeded", error: null })
-      .eq("signature", signature)
+      .from("privacy_cash_shield_jobs")
+      .insert({
+        website_id: website.id,
+        revenue_wallet_id: website.revenue_wallet_id,
+        idempotency_key: idempotencyKey,
+        asset_key: "sol",
+        source_balance_raw: sourceBalanceRaw.toString(),
+        reserve_raw: reserveRaw.toString(),
+        shield_raw: available.toString(),
+        status: isDryRun ? "dry_run" : "pending",
+        error: isDryRun
+          ? env.DRY_RUN
+            ? "DRY_RUN environment kill switch is enabled"
+            : "Live payouts are disabled"
+          : null
+      })
       .select("*")
       .single()
-  );
-  await workerAudit("payout.succeeded", "website", website.id, { signature });
-  await sendPayoutNotifications(website, payout);
+  ) as ShieldJob;
+  if (isDryRun) {
+    await planShieldedPayout(website, shieldJob, "dry_run", settings);
+    return;
+  }
+  const completed = await executeShieldJob(signer, shieldJob);
+  if (!completed) return;
+  await planShieldedPayout(website, completed, "pending", settings);
 }
 
 export async function processWebsite(websiteId: string) {
@@ -450,7 +618,6 @@ export async function processWebsite(websiteId: string) {
     })
   );
   if (!lock) return;
-
   try {
     const website = await loadWebsite(websiteId);
     if (!website.active || !website.hosted) return;
@@ -472,7 +639,6 @@ export async function processWebsite(websiteId: string) {
         .single()
     );
     if (settings.emergencyPaused) return;
-
     if (settings.swapsEnabled) {
       for (const token of tokenBalances) {
         try {
@@ -489,7 +655,10 @@ export async function processWebsite(websiteId: string) {
       tokenBalances = await getTokenBalances(signer.publicKey);
       solLamports = BigInt(await connection.getBalance(signer.publicKey, "confirmed"));
     }
-    await payoutIfEligible(website, signer, solLamports, settings);
+    const reserveLamports =
+      BigInt(Math.ceil(settings.solReserve * LAMPORTS_PER_SOL)) +
+      BigInt(PAYOUT_FEE_BUFFER_LAMPORTS);
+    await shieldAssetIfEligible(website, signer, solLamports, reserveLamports, settings);
   } catch (error) {
     await workerAudit("website.processing_failed", "website", websiteId, {
       error: error instanceof Error ? error.message : String(error)
@@ -513,8 +682,327 @@ export async function reconcileAllWebsites() {
   const websites = unwrap(
     await db.from("websites").select("id").eq("active", true).eq("hosted", true)
   ) as Array<{ id: string }>;
-  for (const website of websites) {
-    await processWebsite(website.id);
+  for (const website of websites) await processWebsite(website.id);
+}
+
+async function sendPrivacyCashPayoutNotifications(
+  website: WebsiteRow,
+  batch: Record<string, unknown>,
+  jobs: Array<Record<string, unknown>>
+) {
+  const ownerJobs = jobs.filter((job) => String(job.recipient_kind).startsWith("owner_"));
+  const managerJobs = jobs.filter((job) => job.recipient_kind === "manager");
+  const sum = (rows: Array<Record<string, unknown>>) =>
+    rows.reduce((total, row) => total + Number(row.net_raw), 0);
+  try {
+    await sendRoute("payout", {
+      embeds: [{
+        title: "Website payout sent",
+        color: 0x64f5b5,
+        fields: [
+          { name: "Website", value: website.domains.domain },
+          { name: "Team", value: website.teams.name },
+          { name: "Owners total", value: displaySolAmount(sum(ownerJobs)) },
+          { name: "Manager total", value: displaySolAmount(sum(managerJobs)) },
+          { name: "Privacy Cash expense", value: displaySolAmount(batch.estimated_fee_raw) },
+          { name: "Randomized legs", value: String(jobs.length) }
+        ]
+      }]
+    }, website.team_id);
+    await sendTeamPayoutMessage(website.teams);
+    await sendOwnersMessage(
+      `Privacy Cash payout completed for ${website.domains.domain}: ${displaySolAmount(batch.net_distribution_raw)} net across ${jobs.length} delayed randomized legs.`
+    );
+  } catch (error) {
+    await workerAudit("payout.notification_failed", "website", website.id, {
+      error: error instanceof Error ? error.message : String(error)
+    });
+  }
+}
+
+async function finalizePrivacyCashPayout(batchId: string) {
+  const batch = unwrap(
+    await db.from("privacy_cash_payout_batches").select("*").eq("id", batchId).single()
+  );
+  const jobs = unwrap(
+    await db.from("privacy_cash_withdrawal_jobs").select("*").eq("payout_batch_id", batchId)
+  ) as Array<Record<string, unknown>>;
+  if (jobs.some((job) => job.status === "review_required")) {
+    unwrap(
+      await db.from("privacy_cash_payout_batches").update({ status: "review_required" }).eq("id", batchId).select("id").single()
+    );
+    return;
+  }
+  if (!jobs.length || jobs.some((job) => job.status !== "succeeded")) return;
+  const completed = unwrap(
+    await db.from("privacy_cash_payout_batches").update({ status: "succeeded" }).eq("id", batchId).select("*").single()
+  );
+  if (completed.notification_sent_at) return;
+  await sendPrivacyCashPayoutNotifications(await loadWebsite(batch.website_id), completed, jobs);
+  unwrap(
+    await db.from("privacy_cash_payout_batches").update({ notification_sent_at: new Date().toISOString() }).eq("id", batchId).select("id").single()
+  );
+}
+
+async function processPrivacyCashWithdrawal(job: PrivacyCashWithdrawalJob) {
+  const website = await loadWebsite(job.website_id);
+  const global = await loadSettings();
+  const settings = effectiveWebsiteSettings(global, website);
+  if (env.DRY_RUN || settings.emergencyPaused || !settings.livePayoutsEnabled || !settings.privacyCashEnabled) {
+    unwrap(
+      await db.from("privacy_cash_withdrawal_jobs").update({ status: "pending" }).eq("id", job.id).select("id").single()
+    );
+    return;
+  }
+  if (env.SOLANA_CLUSTER !== "mainnet-beta") {
+    throw new Error("Privacy Cash live transfers require SOLANA_CLUSTER=mainnet-beta");
+  }
+  const netRaw = BigInt(job.net_raw);
+  const grossRaw = grossUpPrivacyCashWithdrawal(netRaw, await loadPrivacyCashFeeConfig());
+  const result = await withPrivacyCashLease(async () => {
+    const client = createPrivacyCashClient(getSigner(website));
+    const amount = toSafeLamports(grossRaw);
+    const recipientAddress = validateSolanaWalletAddress(job.recipient_wallet_address);
+    const withdrawal = await client.withdraw({ lamports: amount, recipientAddress });
+    return {
+      tx: withdrawal.tx,
+      actualNetRaw: withdrawal.amount_in_lamports,
+      actualFeeRaw: withdrawal.fee_in_lamports
+    };
+  });
+  if (!result) {
+    unwrap(
+      await db.from("privacy_cash_withdrawal_jobs").update({ status: "pending" }).eq("id", job.id).select("id").single()
+    );
+    return;
+  }
+  const actualNet = BigInt(result.actualNetRaw);
+  const actualFee = BigInt(result.actualFeeRaw);
+  const exact = actualNet === netRaw;
+  unwrap(
+    await db
+      .from("privacy_cash_withdrawal_jobs")
+      .update({
+        gross_raw: grossRaw.toString(),
+        estimated_fee_raw: (grossRaw - netRaw).toString(),
+        actual_net_raw: actualNet.toString(),
+        actual_fee_raw: actualFee.toString(),
+        signature: result.tx,
+        status: exact ? "succeeded" : "review_required",
+        error: exact ? null : `Expected ${netRaw} net units but received ${actualNet}`
+      })
+      .eq("id", job.id)
+      .select("id")
+      .single()
+  );
+  await finalizePrivacyCashPayout(job.payout_batch_id);
+}
+
+export async function processPendingPrivacyCashWithdrawals() {
+  const global = await loadSettings();
+  if (env.DRY_RUN || global.emergency_paused || !global.live_payouts_enabled || !global.privacy_cash_enabled) return;
+  const jobs = unwrap(
+    await db.rpc("claim_privacy_cash_withdrawal_jobs", { batch_size: 4 })
+  ) as PrivacyCashWithdrawalJob[];
+  for (const job of jobs) {
+    try {
+      await processPrivacyCashWithdrawal(job);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      unwrap(
+        await db.from("privacy_cash_withdrawal_jobs").update({ status: "review_required", error: message }).eq("id", job.id).select("id").single()
+      );
+      await finalizePrivacyCashPayout(job.payout_batch_id);
+    }
+  }
+}
+
+export async function recoverPrivacyCashShields() {
+  const jobs = unwrap(
+    await db.from("privacy_cash_shield_jobs").select("*").in("status", ["pending", "processing"]).order("created_at")
+  ) as ShieldJob[];
+  for (const job of jobs) {
+    const website = await loadWebsite(job.website_id);
+    const global = await loadSettings();
+    const settings = effectiveWebsiteSettings(global, website);
+    if (env.DRY_RUN || settings.emergencyPaused || !settings.livePayoutsEnabled || !settings.privacyCashEnabled) continue;
+    const signer = getSigner(website);
+    if (job.status === "pending") {
+      const completed = await executeShieldJob(signer, job);
+      if (completed) await planShieldedPayout(website, completed, "pending", settings);
+      continue;
+    }
+    const recovered = await withPrivacyCashLease(async () => {
+      const balance = await privateBalanceRaw(signer);
+      return BigInt(balance) >= BigInt(job.private_balance_before_raw ?? 0) + BigInt(job.shield_raw);
+    });
+    if (recovered === null) continue;
+    if (!recovered) {
+      unwrap(
+        await db.from("privacy_cash_shield_jobs").update({
+          status: "review_required",
+          error: "Could not confirm whether the interrupted Privacy Cash deposit succeeded"
+        }).eq("id", job.id).select("id").single()
+      );
+      continue;
+    }
+    const completed = unwrap(
+      await db.from("privacy_cash_shield_jobs").update({
+        status: "succeeded",
+        error: "Recovered from private balance after an interrupted deposit; signature unavailable"
+      }).eq("id", job.id).select("*").single()
+    ) as ShieldJob;
+    await planShieldedPayout(website, completed, "pending", settings);
+  }
+}
+
+export async function recoverInterruptedPrivacyCashWithdrawals() {
+  const cutoff = new Date(Date.now() - 30 * 60 * 1000).toISOString();
+  const interrupted = unwrap(
+    await db
+      .from("privacy_cash_withdrawal_jobs")
+      .select("id,payout_batch_id")
+      .eq("status", "processing")
+      .lt("updated_at", cutoff)
+  ) as Array<{ id: string; payout_batch_id: string }>;
+  for (const job of interrupted) {
+    unwrap(
+      await db
+        .from("privacy_cash_withdrawal_jobs")
+        .update({
+          status: "review_required",
+          error: "Worker stopped during withdrawal. Verify the recipient transaction manually; automatic retry is disabled."
+        })
+        .eq("id", job.id)
+        .select("id")
+        .single()
+    );
+    await finalizePrivacyCashPayout(job.payout_batch_id);
+  }
+}
+
+interface RotationSettings {
+  rotation_warn_after_days: number | string;
+  rotation_warn_after_legs: number | string;
+  rotation_warn_after_usd: number | string;
+  rotation_warn_after_weekly_legs: number | string;
+}
+
+async function rotationReasons(walletAddress: string, activeSince: string, settings: RotationSettings) {
+  const weekAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+  const [allJobs, recentJobs] = await Promise.all([
+    db
+      .from("privacy_cash_withdrawal_jobs")
+      .select("estimated_usd")
+      .eq("recipient_wallet_address", walletAddress)
+      .eq("status", "succeeded"),
+    db
+      .from("privacy_cash_withdrawal_jobs")
+      .select("id")
+      .eq("recipient_wallet_address", walletAddress)
+      .eq("status", "succeeded")
+      .gte("updated_at", weekAgo)
+  ]);
+  if (allJobs.error) throw new Error(allJobs.error.message);
+  if (recentJobs.error) throw new Error(recentJobs.error.message);
+  const ageDays = (Date.now() - new Date(activeSince).getTime()) / (24 * 60 * 60 * 1000);
+  const totalUsd = allJobs.data.reduce((sum, job) => sum + Number(job.estimated_usd ?? 0), 0);
+  const reasons: string[] = [];
+  if (ageDays >= Number(settings.rotation_warn_after_days)) reasons.push("wallet age");
+  if (allJobs.data.length >= Number(settings.rotation_warn_after_legs)) reasons.push("payout-leg count");
+  if (totalUsd >= Number(settings.rotation_warn_after_usd)) reasons.push("received value");
+  if (recentJobs.data.length >= Number(settings.rotation_warn_after_weekly_legs)) reasons.push("recent payout frequency");
+  return reasons;
+}
+
+async function recordRotationNotification(values: {
+  wallet_kind: "owner" | "manager";
+  owner_profile_id?: string;
+  team_id?: string;
+  wallet_address: string;
+  reason_key: string;
+}) {
+  const result = await db
+    .from("wallet_rotation_notifications")
+    .insert(values)
+    .select("id")
+    .maybeSingle();
+  if (result.error?.code === "23505") return false;
+  if (result.error) throw new Error(result.error.message);
+  return Boolean(result.data);
+}
+
+export async function evaluateWalletRotationRecommendations() {
+  const settings = unwrap(
+    await db
+      .from("app_settings")
+      .select("rotation_warn_after_days,rotation_warn_after_legs,rotation_warn_after_usd,rotation_warn_after_weekly_legs")
+      .eq("id", true)
+      .single()
+  ) as RotationSettings;
+  const owners = unwrap(
+    await db.from("owner_profiles").select("*").eq("active", true)
+  ) as Array<OwnerProfile & { wallet_updated_at: string | null; created_at: string }>;
+  for (const owner of owners) {
+    if (!owner.solana_wallet_address) continue;
+    const reasons = await rotationReasons(
+      owner.solana_wallet_address,
+      owner.wallet_updated_at ?? owner.created_at,
+      settings
+    );
+    if (!reasons.length) continue;
+    const reasonKey = reasons.sort().join(",");
+    if (await recordRotationNotification({
+      wallet_kind: "owner",
+      owner_profile_id: owner.id,
+      wallet_address: owner.solana_wallet_address,
+      reason_key: reasonKey
+    })) {
+      await sendOwnersMessage(
+        `@everyone Wallet rotation recommended for <@${owner.discord_user_id}> (${owner.display_name}). Reason: ${reasons.join(", ")}. Use /owner-wallet-update when ready. Payouts continue to the current wallet until it is changed.`,
+        true
+      );
+    }
+  }
+  const teams = unwrap(
+    await db
+      .from("teams")
+      .select("id,name,manager_wallet_address,payout_discord_channel_id,manager_wallet_updated_at,created_at,team_managers(managers(discord_user_id,active))")
+      .eq("active", true)
+  ) as unknown as Array<{
+    id: string;
+    name: string;
+    manager_wallet_address: string | null;
+    payout_discord_channel_id: string | null;
+    manager_wallet_updated_at: string | null;
+    created_at: string;
+    team_managers: Array<{ managers: { discord_user_id: string; active: boolean } | null }>;
+  }>;
+  for (const team of teams) {
+    if (!team.manager_wallet_address) continue;
+    const reasons = await rotationReasons(
+      team.manager_wallet_address,
+      team.manager_wallet_updated_at ?? team.created_at,
+      settings
+    );
+    if (!reasons.length) continue;
+    const reasonKey = reasons.sort().join(",");
+    if (await recordRotationNotification({
+      wallet_kind: "manager",
+      team_id: team.id,
+      wallet_address: team.manager_wallet_address,
+      reason_key: reasonKey
+    })) {
+      const managerIds = team.team_managers
+        .filter((row) => row.managers?.active)
+        .map((row) => row.managers?.discord_user_id)
+        .filter((id): id is string => Boolean(id));
+      await sendManagerMessage(
+        team,
+        managerIds,
+        `${managerIds.map((id) => `<@${id}>`).join(" ")} Wallet rotation is recommended for ${team.name}. Reason: ${reasons.join(", ")}. Use /wallet-update when ready. Payouts continue to the current wallet until an owner approves the replacement.`
+      );
+    }
   }
 }
 
@@ -528,13 +1016,17 @@ function getEventSignature(payload: Record<string, unknown>): string | undefined
 }
 
 async function isInternalSignature(signature: string): Promise<boolean> {
-  const [swaps, payouts] = await Promise.all([
+  const [swaps, payouts, shields, privateWithdrawals] = await Promise.all([
     db.from("swap_attempts").select("id").eq("signature", signature).limit(1),
-    db.from("payout_attempts").select("id").eq("signature", signature).limit(1)
+    db.from("payout_attempts").select("id").eq("signature", signature).limit(1),
+    db.from("privacy_cash_shield_jobs").select("id").eq("signature", signature).limit(1),
+    db.from("privacy_cash_withdrawal_jobs").select("id").eq("signature", signature).limit(1)
   ]);
   if (swaps.error) throw new Error(swaps.error.message);
   if (payouts.error) throw new Error(payouts.error.message);
-  return Boolean(swaps.data.length || payouts.data.length);
+  if (shields.error) throw new Error(shields.error.message);
+  if (privateWithdrawals.error) throw new Error(privateWithdrawals.error.message);
+  return Boolean(swaps.data.length || payouts.data.length || shields.data.length || privateWithdrawals.data.length);
 }
 
 async function recordDeposit(
@@ -690,7 +1182,7 @@ export async function recoverSubmittedPayouts() {
       const payout = unwrap(
         await db.from("payout_attempts").update({ status: "succeeded", error: null }).eq("id", attempt.id).select("*").single()
       );
-      await sendPayoutNotifications(await loadWebsite(attempt.website_id), payout);
+      await sendLegacyPayoutNotifications(await loadWebsite(attempt.website_id), payout);
       continue;
     }
     if (blockHeight > attempt.last_valid_block_height) {

@@ -14,7 +14,12 @@ import {
 import { validateSolanaWalletAddress } from "@payment/shared";
 import { db, unwrap } from "./db.js";
 import { env } from "./env.js";
-import { sendRoute, setDiscordClient } from "./notifications.js";
+import {
+  sendManagerMessage,
+  sendOwnersMessage,
+  sendRoute,
+  setDiscordClient
+} from "./notifications.js";
 
 interface Team {
   id: string;
@@ -27,10 +32,38 @@ async function loadSettings() {
   return unwrap(
     await db
       .from("app_settings")
-      .select("discord_manager_role_ids,discord_staff_role_ids")
+      .select("discord_manager_role_ids,discord_staff_role_ids,owners_discord_guild_id")
       .eq("id", true)
       .single()
-  ) as { discord_manager_role_ids: string[]; discord_staff_role_ids: string[] };
+  ) as {
+    discord_manager_role_ids: string[];
+    discord_staff_role_ids: string[];
+    owners_discord_guild_id: string | null;
+  };
+}
+
+async function loadOwner(discordUserId: string) {
+  return unwrap(
+    await db
+      .from("owner_profiles")
+      .select("*")
+      .eq("discord_user_id", discordUserId)
+      .eq("active", true)
+      .single()
+  ) as {
+    id: string;
+    display_name: string;
+    discord_user_id: string;
+    solana_wallet_address: string | null;
+  };
+}
+
+async function requireOwner(interaction: { guildId: string | null; user: { id: string } }) {
+  const settings = await loadSettings();
+  if (!settings.owners_discord_guild_id || interaction.guildId !== settings.owners_discord_guild_id) {
+    throw new Error("This owner command is only available in the configured owners server");
+  }
+  return loadOwner(interaction.user.id);
 }
 
 async function loadTeams(): Promise<Team[]> {
@@ -89,6 +122,24 @@ async function teamForCommand(
 }
 
 async function handleAutocomplete(interaction: AutocompleteInteraction) {
+  if (["approve-manager-wallet", "reject-manager-wallet"].includes(interaction.commandName)) {
+    await requireOwner(interaction);
+    const focused = interaction.options.getFocused().toLowerCase();
+    const requests = unwrap(
+      await db
+        .from("manager_wallet_change_requests")
+        .select("id,teams(name)")
+        .eq("status", "pending")
+        .order("created_at", { ascending: false })
+        .limit(25)
+    ) as unknown as Array<{ id: string; teams: { name: string } }>;
+    await interaction.respond(
+      requests
+        .filter((request) => request.teams.name.toLowerCase().includes(focused))
+        .map((request) => ({ name: request.teams.name, value: request.id }))
+    );
+    return;
+  }
   const command = interaction.commandName as "request-website" | "wallet-update";
   if (!["request-website", "wallet-update"].includes(command)) return;
   const focused = interaction.options.getFocused().toLowerCase();
@@ -159,6 +210,131 @@ async function handleWalletUpdate(interaction: ChatInputCommandInteraction) {
   await interaction.showModal(modal);
 }
 
+async function handleOwnerWalletUpdate(interaction: ChatInputCommandInteraction) {
+  await requireOwner(interaction);
+  const modal = new ModalBuilder()
+    .setCustomId("owner-wallet-update")
+    .setTitle("Update your owner payout wallet");
+  modal.addComponents(
+    new ActionRowBuilder<TextInputBuilder>().addComponents(
+      new TextInputBuilder()
+        .setCustomId("wallet")
+        .setLabel("New Solana payout wallet")
+        .setStyle(TextInputStyle.Short)
+        .setRequired(true)
+    ),
+    new ActionRowBuilder<TextInputBuilder>().addComponents(
+      new TextInputBuilder()
+        .setCustomId("wallet-confirm")
+        .setLabel("Confirm the new wallet address")
+        .setStyle(TextInputStyle.Short)
+        .setRequired(true)
+    )
+  );
+  await interaction.showModal(modal);
+}
+
+async function loadPendingManagerWalletRequest(requestId: string) {
+  return unwrap(
+    await db
+      .from("manager_wallet_change_requests")
+      .select("*,teams(id,name,payout_discord_channel_id,team_managers(managers(discord_user_id,active)))")
+      .eq("id", requestId)
+      .eq("status", "pending")
+      .single()
+  ) as {
+    id: string;
+    team_id: string;
+    old_wallet_address: string | null;
+    new_wallet_address: string;
+    requested_by_actor_id: string;
+    teams: {
+      id: string;
+      name: string;
+      payout_discord_channel_id: string | null;
+      team_managers: Array<{ managers: { discord_user_id: string; active: boolean } | null }>;
+    };
+  };
+}
+
+async function reviewManagerWalletRequest(
+  interaction: ChatInputCommandInteraction,
+  status: "approved" | "rejected"
+) {
+  const owner = await requireOwner(interaction);
+  const requestId = interaction.options.getString("request", true);
+  const request = await loadPendingManagerWalletRequest(requestId);
+  if (status === "approved") {
+    unwrap(
+      await db
+        .from("teams")
+        .update({
+          manager_wallet_address: request.new_wallet_address,
+          manager_wallet_updated_at: new Date().toISOString()
+        })
+        .eq("id", request.team_id)
+        .select("id")
+        .single()
+    );
+    unwrap(
+      await db
+        .from("wallet_update_history")
+        .insert({
+          team_id: request.team_id,
+          old_wallet_address: request.old_wallet_address,
+          new_wallet_address: request.new_wallet_address,
+          actor_type: "discord",
+          actor_id: owner.discord_user_id
+        })
+        .select("id")
+        .single()
+    );
+  }
+  unwrap(
+    await db
+      .from("manager_wallet_change_requests")
+      .update({
+        status,
+        reviewed_by_owner_profile_id: owner.id,
+        reviewed_at: new Date().toISOString()
+      })
+      .eq("id", request.id)
+      .eq("status", "pending")
+      .select("id")
+      .single()
+  );
+  unwrap(
+    await db
+      .from("audit_logs")
+      .insert({
+        actor_type: "discord",
+        actor_id: owner.discord_user_id,
+        action: `team.wallet_change_${status}`,
+        entity_type: "manager_wallet_change_request",
+        entity_id: request.id,
+        metadata: { team_id: request.team_id }
+      })
+      .select("id")
+      .single()
+  );
+  const managerIds = request.teams.team_managers
+    .filter((row) => row.managers?.active)
+    .map((row) => row.managers?.discord_user_id)
+    .filter((id): id is string => Boolean(id));
+  await sendOwnersMessage(
+    `Manager payout wallet request for ${request.teams.name} was ${status} by <@${owner.discord_user_id}>.`
+  );
+  await sendManagerMessage(
+    request.teams,
+    managerIds,
+    `${managerIds.map((id) => `<@${id}>`).join(" ")} Your payout wallet request for ${request.teams.name} was ${status}.`
+  );
+  await interaction.reply({
+    content: `The manager payout wallet request for ${request.teams.name} was ${status}.`,
+    flags: MessageFlags.Ephemeral
+  });
+}
+
 async function submitWebsiteRequest(interaction: ModalSubmitInteraction, teamId: string) {
   const team = await teamForCommand(interaction, "request-website", teamId);
   const ideas = interaction.fields.getTextInputValue("ideas").trim();
@@ -220,22 +396,82 @@ async function submitWalletUpdate(interaction: ModalSubmitInteraction, teamId: s
   const confirmation = interaction.fields.getTextInputValue("wallet-confirm").trim();
   if (address !== confirmation) throw new Error("The wallet addresses do not match");
   const wallet = validateSolanaWalletAddress(address);
+  const pending = await db
+    .from("manager_wallet_change_requests")
+    .select("id")
+    .eq("team_id", team.id)
+    .eq("status", "pending")
+    .maybeSingle();
+  if (pending.error) throw new Error(pending.error.message);
+  const values = {
+    team_id: team.id,
+    old_wallet_address: team.manager_wallet_address,
+    new_wallet_address: wallet,
+    requested_by_actor_type: "discord",
+    requested_by_actor_id: interaction.user.id,
+    status: "pending"
+  };
+  const request = pending.data
+    ? unwrap(
+        await db
+          .from("manager_wallet_change_requests")
+          .update(values)
+          .eq("id", pending.data.id)
+          .select("id")
+          .single()
+      )
+    : unwrap(
+        await db
+          .from("manager_wallet_change_requests")
+          .insert(values)
+          .select("id")
+          .single()
+      );
   unwrap(
     await db
-      .from("teams")
-      .update({ manager_wallet_address: wallet })
-      .eq("id", team.id)
+      .from("audit_logs")
+      .insert({
+        actor_type: "discord",
+        actor_id: interaction.user.id,
+        action: "team.wallet_change_requested",
+        entity_type: "manager_wallet_change_request",
+        entity_id: request.id,
+        metadata: { old_wallet_address: team.manager_wallet_address, new_wallet_address: wallet }
+      })
+      .select("id")
+      .single()
+  );
+  await sendOwnersMessage(
+    `@everyone <@${interaction.user.id}> requested a manager payout wallet update for ${team.name}. Review it with /approve-manager-wallet or /reject-manager-wallet.`,
+    true
+  );
+  await interaction.reply({
+    content: `Your payout wallet request for ${team.name} is waiting for owner approval. Payouts continue to the previously approved wallet until then.`,
+    flags: MessageFlags.Ephemeral
+  });
+}
+
+async function submitOwnerWalletUpdate(interaction: ModalSubmitInteraction) {
+  const owner = await requireOwner(interaction);
+  const address = interaction.fields.getTextInputValue("wallet").trim();
+  const confirmation = interaction.fields.getTextInputValue("wallet-confirm").trim();
+  if (address !== confirmation) throw new Error("The wallet addresses do not match");
+  const wallet = validateSolanaWalletAddress(address);
+  unwrap(
+    await db
+      .from("owner_profiles")
+      .update({ solana_wallet_address: wallet, wallet_updated_at: new Date().toISOString() })
+      .eq("id", owner.id)
       .select("id")
       .single()
   );
   unwrap(
     await db
-      .from("wallet_update_history")
+      .from("owner_wallet_update_history")
       .insert({
-        team_id: team.id,
-        old_wallet_address: team.manager_wallet_address,
+        owner_profile_id: owner.id,
+        old_wallet_address: owner.solana_wallet_address,
         new_wallet_address: wallet,
-        actor_type: "discord",
         actor_id: interaction.user.id
       })
       .select("id")
@@ -247,16 +483,17 @@ async function submitWalletUpdate(interaction: ModalSubmitInteraction, teamId: s
       .insert({
         actor_type: "discord",
         actor_id: interaction.user.id,
-        action: "team.wallet_updated",
-        entity_type: "team",
-        entity_id: team.id,
-        metadata: { old_wallet_address: team.manager_wallet_address, new_wallet_address: wallet }
+        action: "owner.wallet_updated",
+        entity_type: "owner_profile",
+        entity_id: owner.id,
+        metadata: { old_wallet_address: owner.solana_wallet_address, new_wallet_address: wallet }
       })
       .select("id")
       .single()
   );
+  await sendOwnersMessage(`<@${owner.discord_user_id}> updated their owner payout wallet.`);
   await interaction.reply({
-    content: `The payout wallet for ${team.name} has been updated. Future payouts will use the new address.`,
+    content: "Your owner payout wallet has been updated. Future payout batches will use the new address.",
     flags: MessageFlags.Ephemeral
   });
 }
@@ -273,8 +510,16 @@ export async function startDiscordBot() {
       if (interaction.isChatInputCommand()) {
         if (interaction.commandName === "request-website") return await handleRequestWebsite(interaction);
         if (interaction.commandName === "wallet-update") return await handleWalletUpdate(interaction);
+        if (interaction.commandName === "owner-wallet-update") return await handleOwnerWalletUpdate(interaction);
+        if (interaction.commandName === "approve-manager-wallet") {
+          return await reviewManagerWalletRequest(interaction, "approved");
+        }
+        if (interaction.commandName === "reject-manager-wallet") {
+          return await reviewManagerWalletRequest(interaction, "rejected");
+        }
       }
       if (interaction.isModalSubmit()) {
+        if (interaction.customId === "owner-wallet-update") return await submitOwnerWalletUpdate(interaction);
         const [command, teamId] = interaction.customId.split(":");
         if (!teamId) return;
         if (command === "request-website") return await submitWebsiteRequest(interaction, teamId);

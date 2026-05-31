@@ -14,13 +14,16 @@ The checked-in defaults do not move money:
 - Incoming Helius events and submitted payouts are deduplicated.
 - Submitted payout transactions are stored and recovered after worker restarts.
 - Suspicious, unpriced, unroutable, or high-impact tokens are quarantined instead of swapped.
+- Privacy Cash starts disabled and only runs on Solana mainnet after every kill switch allows it.
+- Every guarded SPL conversion, including USDC, settles to native SOL before Privacy Cash shielding.
+- SOL payouts are split into delayed randomized legs. Interrupted private withdrawals require manual review and are never retried blindly.
 
 Custom vanity wallets work normally as long as they are valid on-curve Solana public keys.
 
 ## Components
 
 - `apps/server`: protected dashboard API, static dashboard, and authenticated Helius endpoint.
-- `apps/worker`: Discord bot, Helius registration, periodic reconciliation, swaps, and payouts.
+- `apps/worker`: Discord bot, Helius registration, periodic reconciliation, swaps, Privacy Cash shielding, delayed randomized withdrawals, and wallet-rotation recommendations.
 - `packages/shared`: encryption, wallet validation, constants, and payout-setting resolution.
 - `supabase/migrations`: Postgres schema, RLS lockdown, event claiming, and worker leases.
 
@@ -44,14 +47,16 @@ RLS is enabled and browser roles are revoked. Only the backend services use the 
 3. Record the application ID as `DISCORD_APPLICATION_ID`.
 4. Enable Developer Mode in Discord and copy your server ID as `DISCORD_GUILD_ID`.
 5. Invite the bot with the `bot` and `applications.commands` scopes. Grant it permission to view and send messages in team payout channels.
-6. Create a manager role and optionally a staff role. Copy their IDs.
-7. After deployment, add the role IDs under **Settings** in this platform.
-8. Run `docker compose exec worker npm run register:discord`.
-9. In Discord, open **Server Settings > Integrations > your bot** and allow:
+6. Create a separate owners-only Discord server and invite the same bot. Record that server ID as `DISCORD_OWNERS_GUILD_ID`.
+7. Create a private owners notification channel. Add its server and channel IDs under **Settings** in this platform.
+8. Create a manager role and optionally a staff role in the manager server. Copy their IDs.
+9. After deployment, add the role IDs under **Settings** in this platform.
+10. Run `docker compose exec worker npm run register:discord`.
+11. In the manager server, open **Server Settings > Integrations > your bot** and allow:
    - `/wallet-update` for the manager role only.
    - `/request-website` for the manager role and optional staff role.
 
-The bot also verifies roles and manager-to-team assignments server-side. Discord administrators may still see commands, but unauthorized use is rejected.
+The bot also verifies roles and manager-to-team assignments server-side. In the owners server, `/owner-wallet-update`, `/approve-manager-wallet`, and `/reject-manager-wallet` are registered separately. Only owner profiles linked by immutable Discord user ID can use them.
 
 ## 3. Create Helius And Jupiter Keys
 
@@ -145,10 +150,10 @@ In the dashboard:
 
 1. Add global Discord webhook routes.
 2. Add manager Discord IDs.
-3. Add teams, assign managers, and configure each team channel and payout message.
+3. Add exactly three owner profiles with Discord IDs. Add teams, assign managers, and configure each team channel and payout message.
 4. Import devnet revenue-wallet private keys.
 5. Bulk-import domains.
-6. Assign a domain, team, revenue wallet, company wallet, and optional website overrides.
+6. Assign a domain, team, revenue wallet, and optional website overrides.
 7. Toggle **Hosted** for the website.
 8. Keep the emergency pause enabled initially.
 
@@ -162,21 +167,24 @@ Complete this checklist on devnet:
 4. Invalid and off-curve wallet values are rejected.
 5. Toggling **Hosted** sends an `@everyone` activation message.
 6. A devnet SOL deposit appears in the dashboard and Discord.
-7. Dry-run payout records appear above the configured USD threshold.
+7. Dry-run Privacy Cash shield batches and randomized SOL payout legs appear above the configured USD threshold.
 8. Restarting `worker` does not duplicate a deposit or payout.
 9. The emergency pause prevents swaps and payouts.
 10. A notification-route test succeeds from the dashboard.
+
+Privacy Cash does not offer devnet support. Devnet verifies application logic only. Protocol integration must use a tightly capped mainnet canary.
 
 ## 8. Enable Mainnet Carefully
 
 1. Change `SOLANA_CLUSTER=mainnet-beta`.
 2. Use a production Helius RPC URL.
-3. Recreate the hosted website assignments with mainnet revenue wallets and company wallets.
+3. Recreate the hosted website assignments with mainnet revenue wallets.
 4. Start with a low-value website and keep `DRY_RUN=true`.
 5. Confirm deposit detection and dry-run payout calculations.
-6. In the dashboard, disable **Emergency pause**, then enable **Guarded SPL swaps** and **Live payouts**.
-7. Change `DRY_RUN=false` in Ubuntu `.env`.
-8. Restart:
+6. Add three linked owner profiles and set the owners Discord channel. Register both guilds with `docker compose exec worker npm run register:discord`.
+7. In the dashboard, disable **Emergency pause**, then enable **Guarded SPL swaps**, **Privacy Cash**, and **Live payouts**.
+8. Change `DRY_RUN=false` in Ubuntu `.env`.
+9. Restart:
 
 ```bash
 docker compose up -d
@@ -200,6 +208,8 @@ docker compose exec worker npm run register:discord
 
 Review [`SECURITY.md`](./SECURITY.md) before enabling mainnet transfers.
 
+The worker intentionally installs dependencies with `--ignore-scripts`. Do not remove that flag: it keeps the optional vulnerable `bigint-buffer` native binding disabled and forces the guarded pure-JavaScript fallback.
+
 ## External Documentation
 
 - [Discord application commands](https://docs.discord.com/developers/interactions/application-commands)
@@ -210,3 +220,5 @@ Review [`SECURITY.md`](./SECURITY.md) before enabling mainnet transfers.
 - [Jupiter Tokens API](https://developers.jup.ag/docs/tokens)
 - [Solana RPC commitments](https://solana.com/docs/rpc)
 - [Supabase Row Level Security](https://supabase.com/docs/guides/database/postgres/row-level-security)
+- [Privacy Cash backend SDK](https://privacycash.mintlify.app/sdk/overview)
+- [Privacy Cash privacy tips](https://privacycash.mintlify.app/documentation/user-docs/privacy-tips)

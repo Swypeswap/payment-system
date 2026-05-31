@@ -3,6 +3,9 @@ export interface GlobalSettings {
   global_manager_percent: number | string;
   global_company_percent: number | string;
   global_sol_reserve: number | string;
+  privacy_cash_enabled: boolean;
+  privacy_min_delay_hours: number | string;
+  privacy_max_delay_hours: number | string;
   min_swap_usd: number | string;
   max_price_impact_pct: number | string;
   min_organic_score: number | string;
@@ -23,6 +26,9 @@ export interface EffectiveWebsiteSettings {
   managerPercent: number;
   companyPercent: number;
   solReserve: number;
+  privacyCashEnabled: boolean;
+  privacyMinDelayHours: number;
+  privacyMaxDelayHours: number;
   minSwapUsd: number;
   maxPriceImpactPct: number;
   minOrganicScore: number;
@@ -53,11 +59,20 @@ export function effectiveWebsiteSettings(
     throw new Error("Manager and company payout percentages must add up to 100");
   }
 
+  const privacyMinDelayHours = numberValue(global.privacy_min_delay_hours);
+  const privacyMaxDelayHours = numberValue(global.privacy_max_delay_hours);
+  if (privacyMinDelayHours < 24 || privacyMaxDelayHours < privacyMinDelayHours) {
+    throw new Error("Privacy Cash payout delay must be at least 24 hours with a valid range");
+  }
+
   return {
     thresholdUsd: numberValue(website.threshold_usd ?? global.global_threshold_usd),
     managerPercent,
     companyPercent,
     solReserve: numberValue(website.sol_reserve ?? global.global_sol_reserve),
+    privacyCashEnabled: global.privacy_cash_enabled,
+    privacyMinDelayHours,
+    privacyMaxDelayHours,
     minSwapUsd: numberValue(global.min_swap_usd),
     maxPriceImpactPct: numberValue(global.max_price_impact_pct),
     minOrganicScore: numberValue(global.min_organic_score),

@@ -16,12 +16,15 @@ const envSchema = z.object({
   DISCORD_BOT_TOKEN: optionalSecret,
   DISCORD_APPLICATION_ID: optionalSecret,
   DISCORD_GUILD_ID: optionalSecret,
+  DISCORD_OWNERS_GUILD_ID: optionalSecret,
   DRY_RUN: z
     .string()
     .default("true")
     .transform((value) => value.toLowerCase() !== "false"),
   RECONCILE_INTERVAL_MS: z.coerce.number().int().positive().default(60_000),
   EVENT_INTERVAL_MS: z.coerce.number().int().positive().default(10_000),
+  PRIVACY_CASH_INTERVAL_MS: z.coerce.number().int().positive().default(60_000),
+  ROTATION_CHECK_INTERVAL_MS: z.coerce.number().int().positive().default(21_600_000),
   HELIUS_SYNC_INTERVAL_MS: z.coerce.number().int().positive().default(600_000),
   WORKER_ID: z.string().default(`${hostname()}-${process.pid}`)
 });

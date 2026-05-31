@@ -7,8 +7,11 @@ import {
   CONFETTI_WEBHOOK_NAMES,
   effectiveWebsiteSettings,
   encryptSecret,
+  grossUpPrivacyCashWithdrawal,
   parseDomain,
   parseSecretKey,
+  planPrivacyCashDistribution,
+  privacyCashNetFromGross,
   toHttpsWebsiteUrl,
   validateSolanaWalletAddress
 } from "./index.js";
@@ -37,6 +40,9 @@ test("resolves website overrides and validates percentages", () => {
       global_manager_percent: 10,
       global_company_percent: 90,
       global_sol_reserve: 0.02,
+      privacy_cash_enabled: false,
+      privacy_min_delay_hours: 24,
+      privacy_max_delay_hours: 72,
       min_swap_usd: 1,
       max_price_impact_pct: 5,
       min_organic_score: 0,
@@ -53,6 +59,45 @@ test("resolves website overrides and validates percentages", () => {
   );
   assert.equal(settings.thresholdUsd, 250);
   assert.equal(settings.managerPercent, 10);
+});
+
+test("grosses up Privacy Cash fees while preserving an exact recipient net amount", () => {
+  const fees = { withdrawFeeRate: 0.0035, withdrawBaseFeeLamports: 6_000_000 };
+  const net = 100_000_000n;
+  const gross = grossUpPrivacyCashWithdrawal(net, fees);
+  assert.equal(privacyCashNetFromGross(gross, fees), net);
+  assert.ok(gross > net);
+});
+
+test("plans the largest exact 30/30/30/10 Privacy Cash distribution within a shield budget", () => {
+  const fees = { withdrawFeeRate: 0.0035, withdrawBaseFeeLamports: 6_000_000 };
+  const plan = planPrivacyCashDistribution(1_000_000_000n, fees);
+  const [owner1, owner2, owner3, manager] = plan.withdrawals;
+  assert.equal(owner1?.netLamports, owner2?.netLamports);
+  assert.equal(owner2?.netLamports, owner3?.netLamports);
+  assert.equal(owner1?.netLamports, (manager?.netLamports ?? 0n) * 3n);
+  assert.equal(
+    plan.grossDistributionLamports + plan.dustLamports,
+    1_000_000_000n
+  );
+  assert.ok(plan.dustLamports < 10n);
+});
+
+test("splits each Privacy Cash entitlement into weighted legs without changing its exact share", () => {
+  const fees = { withdrawFeeRate: 0.0035, withdrawBaseFeeLamports: 6_000_000 };
+  const plan = planPrivacyCashDistribution(
+    2_000_000_000n,
+    fees,
+    [[8, 12], [10, 9, 11], [11, 9], [8, 12]]
+  );
+  const sum = (kind: string) =>
+    plan.withdrawals
+      .filter((item) => item.recipientKind === kind)
+      .reduce((total, item) => total + item.netLamports, 0n);
+  assert.equal(sum("owner_1"), sum("manager") * 3n);
+  assert.equal(sum("owner_2"), sum("manager") * 3n);
+  assert.equal(sum("owner_3"), sum("manager") * 3n);
+  assert.equal(plan.withdrawals.length, 9);
 });
 
 test("uses the configured Confetti identity for Discord webhook messages", () => {

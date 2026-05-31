@@ -73,7 +73,7 @@ async function updateTeamWallet(
   unwrap(
     await db
       .from("teams")
-      .update({ manager_wallet_address: wallet })
+      .update({ manager_wallet_address: wallet, manager_wallet_updated_at: new Date().toISOString() })
       .eq("id", teamId)
       .select("id")
       .single()
@@ -92,6 +92,33 @@ async function updateTeamWallet(
       .single()
   );
   return wallet;
+}
+
+async function requestTeamWalletUpdate(teamId: string, address: string, actorId: string) {
+  const wallet = validateSolanaWalletAddress(address);
+  const team = unwrap(
+    await db.from("teams").select("manager_wallet_address").eq("id", teamId).single()
+  );
+  const pending = await db
+    .from("manager_wallet_change_requests")
+    .select("id")
+    .eq("team_id", teamId)
+    .eq("status", "pending")
+    .maybeSingle();
+  if (pending.error) throw new Error(pending.error.message);
+  const values = {
+    team_id: teamId,
+    old_wallet_address: team.manager_wallet_address,
+    new_wallet_address: wallet,
+    requested_by_actor_type: "dashboard",
+    requested_by_actor_id: actorId,
+    status: "pending"
+  };
+  return pending.data
+    ? unwrap(
+        await db.from("manager_wallet_change_requests").update(values).eq("id", pending.data.id).select("*").single()
+      )
+    : unwrap(await db.from("manager_wallet_change_requests").insert(values).select("*").single());
 }
 
 export async function registerRoutes(app: FastifyInstance) {
@@ -147,6 +174,7 @@ export async function registerRoutes(app: FastifyInstance) {
         settings,
         teams,
         managers,
+        owners,
         wallets,
         domains,
         websites,
@@ -154,6 +182,9 @@ export async function registerRoutes(app: FastifyInstance) {
         deposits,
         swaps,
         payouts,
+        privacyCashWithdrawals,
+        managerWalletRequests,
+        rotationNotifications,
         auditLogs,
         walletHistory,
         routes
@@ -164,6 +195,7 @@ export async function registerRoutes(app: FastifyInstance) {
           .select("*,team_managers(manager_id,managers(id,display_name,discord_user_id,discord_username,active))")
           .order("name"),
         db.from("managers").select("*").order("display_name"),
+        db.from("owner_profiles").select("*").order("display_name"),
         db.from("revenue_wallets").select("id,label,address,active,created_at,updated_at").order("label"),
         db.from("domains").select("*").order("domain"),
         db
@@ -173,7 +205,10 @@ export async function registerRoutes(app: FastifyInstance) {
         db.from("website_requests").select("*,teams(name)").order("created_at", { ascending: false }).limit(50),
         db.from("deposits").select("*,websites(domains(domain)),revenue_wallets(address)").order("created_at", { ascending: false }).limit(50),
         db.from("swap_attempts").select("*,websites(domains(domain))").order("created_at", { ascending: false }).limit(50),
-        db.from("payout_attempts").select("*,websites(domains(domain))").order("created_at", { ascending: false }).limit(50),
+        db.from("privacy_cash_payout_batches").select("*,websites(domains(domain))").order("created_at", { ascending: false }).limit(50),
+        db.from("privacy_cash_withdrawal_jobs").select("*,websites(domains(domain))").order("created_at", { ascending: false }).limit(100),
+        db.from("manager_wallet_change_requests").select("*,teams(name)").order("created_at", { ascending: false }).limit(50),
+        db.from("wallet_rotation_notifications").select("*").order("created_at", { ascending: false }).limit(100),
         db.from("audit_logs").select("*").order("created_at", { ascending: false }).limit(100),
         db.from("wallet_update_history").select("*,teams(name)").order("created_at", { ascending: false }).limit(50),
         listRedactedRoutes()
@@ -183,6 +218,7 @@ export async function registerRoutes(app: FastifyInstance) {
         settings: unwrap(settings),
         teams: unwrap(teams),
         managers: unwrap(managers),
+        owners: unwrap(owners),
         wallets: unwrap(wallets),
         domains: unwrap(domains),
         websites: unwrap(websites),
@@ -190,6 +226,9 @@ export async function registerRoutes(app: FastifyInstance) {
         deposits: unwrap(deposits),
         swaps: unwrap(swaps),
         payouts: unwrap(payouts),
+        privacyCashWithdrawals: unwrap(privacyCashWithdrawals),
+        managerWalletRequests: unwrap(managerWalletRequests),
+        rotationNotifications: unwrap(rotationNotifications),
         auditLogs: unwrap(auditLogs),
         walletHistory: unwrap(walletHistory),
         notificationRoutes: routes
@@ -200,12 +239,19 @@ export async function registerRoutes(app: FastifyInstance) {
       const values = z
         .object({
           global_threshold_usd: z.number().positive(),
-          global_manager_percent: percent,
-          global_company_percent: percent,
           global_sol_reserve: z.number().nonnegative(),
           min_swap_usd: z.number().nonnegative(),
           max_price_impact_pct: z.number().nonnegative(),
           min_organic_score: percent,
+          privacy_cash_enabled: z.boolean(),
+          privacy_min_delay_hours: z.number().int().min(24),
+          privacy_max_delay_hours: z.number().int().min(24),
+          owners_discord_guild_id: z.string().regex(/^[0-9]{15,22}$/).nullable(),
+          owners_notifications_channel_id: z.string().regex(/^[0-9]{15,22}$/).nullable(),
+          rotation_warn_after_days: z.number().int().positive(),
+          rotation_warn_after_legs: z.number().int().positive(),
+          rotation_warn_after_usd: z.number().positive(),
+          rotation_warn_after_weekly_legs: z.number().int().positive(),
           swaps_enabled: z.boolean(),
           live_payouts_enabled: z.boolean(),
           emergency_paused: z.boolean(),
@@ -213,8 +259,8 @@ export async function registerRoutes(app: FastifyInstance) {
           discord_staff_role_ids: z.array(z.string().regex(/^[0-9]{15,22}$/))
         })
         .parse(request.body);
-      if (values.global_manager_percent + values.global_company_percent !== 100) {
-        throw new Error("Global payout percentages must add up to 100");
+      if (values.privacy_max_delay_hours < values.privacy_min_delay_hours) {
+        throw new Error("Maximum Privacy Cash delay must be at least the minimum delay");
       }
       const data = unwrap(
         await db.from("app_settings").update(values).eq("id", true).select("*").single()
@@ -272,6 +318,82 @@ export async function registerRoutes(app: FastifyInstance) {
       return { ok: true };
     });
 
+    protectedApi.post("/api/owners", async (request) => {
+      const values = z
+        .object({
+          display_name: z.string().trim().min(1),
+          discord_user_id: z.string().regex(/^[0-9]{15,22}$/),
+          discord_username: z.string().trim().optional(),
+          solana_wallet_address: z.string().optional()
+        })
+        .parse(request.body);
+      const activeOwners = unwrap(
+        await db.from("owner_profiles").select("id").eq("active", true)
+      );
+      if (activeOwners.length >= 3) throw new Error("Only three active owner profiles are allowed");
+      const data = unwrap(
+        await db
+          .from("owner_profiles")
+          .insert({
+            ...values,
+            solana_wallet_address: values.solana_wallet_address
+              ? validateSolanaWalletAddress(values.solana_wallet_address)
+              : null,
+            wallet_updated_at: values.solana_wallet_address ? new Date().toISOString() : null
+          })
+          .select("*")
+          .single()
+      );
+      await audit("owner.created", "owner_profile", data.id);
+      return data;
+    });
+
+    protectedApi.put("/api/owners/:id", async (request) => {
+      const { id } = z.object({ id: uuid }).parse(request.params);
+      const values = z
+        .object({
+          display_name: z.string().trim().min(1).optional(),
+          discord_username: z.string().trim().optional(),
+          solana_wallet_address: z.string().optional(),
+          active: z.boolean().optional()
+        })
+        .parse(request.body);
+      const previous = unwrap(
+        await db.from("owner_profiles").select("*").eq("id", id).single()
+      );
+      const wallet = values.solana_wallet_address
+        ? validateSolanaWalletAddress(values.solana_wallet_address)
+        : undefined;
+      const data = unwrap(
+        await db
+          .from("owner_profiles")
+          .update({
+            ...values,
+            solana_wallet_address: wallet,
+            wallet_updated_at: wallet ? new Date().toISOString() : undefined
+          })
+          .eq("id", id)
+          .select("*")
+          .single()
+      );
+      if (wallet && wallet !== previous.solana_wallet_address) {
+        unwrap(
+          await db
+            .from("owner_wallet_update_history")
+            .insert({
+              owner_profile_id: id,
+              old_wallet_address: previous.solana_wallet_address,
+              new_wallet_address: wallet,
+              actor_id: "shared-staff-account"
+            })
+            .select("id")
+            .single()
+        );
+      }
+      await audit("owner.updated", "owner_profile", id);
+      return data;
+    });
+
     protectedApi.post("/api/teams", async (request) => {
       const values = z
         .object({
@@ -285,7 +407,8 @@ export async function registerRoutes(app: FastifyInstance) {
         ...values,
         manager_wallet_address: values.manager_wallet_address
           ? validateSolanaWalletAddress(values.manager_wallet_address)
-          : null
+          : null,
+        manager_wallet_updated_at: values.manager_wallet_address ? new Date().toISOString() : null
       };
       const data = unwrap(await db.from("teams").insert(insert).select("*").single());
       await audit("team.created", "team", data.id);
@@ -310,7 +433,7 @@ export async function registerRoutes(app: FastifyInstance) {
         unwrap(await db.from("teams").update(update).eq("id", id).select("id").single());
       }
       if (wallet) {
-        await updateTeamWallet(id, wallet, "dashboard", "shared-staff-account");
+        await requestTeamWalletUpdate(id, wallet, "shared-staff-account");
       }
       await audit("team.updated", "team", id);
       return { ok: true };
@@ -341,6 +464,41 @@ export async function registerRoutes(app: FastifyInstance) {
         .eq("manager_id", managerId);
       if (error) throw new Error(error.message);
       await audit("team.manager_removed", "team", teamId, { manager_id: managerId });
+      return { ok: true };
+    });
+
+    protectedApi.post("/api/manager-wallet-requests/:id/:decision", async (request) => {
+      const { id, decision } = z
+        .object({ id: uuid, decision: z.enum(["approved", "rejected"]) })
+        .parse(request.params);
+      const pending = unwrap(
+        await db
+          .from("manager_wallet_change_requests")
+          .select("*")
+          .eq("id", id)
+          .eq("status", "pending")
+          .single()
+      );
+      if (decision === "approved") {
+        await updateTeamWallet(
+          pending.team_id,
+          pending.new_wallet_address,
+          "dashboard",
+          "shared-staff-account"
+        );
+      }
+      unwrap(
+        await db
+          .from("manager_wallet_change_requests")
+          .update({ status: decision, reviewed_at: new Date().toISOString() })
+          .eq("id", id)
+          .eq("status", "pending")
+          .select("id")
+          .single()
+      );
+      await audit(`team.wallet_change_${decision}`, "manager_wallet_change_request", id, {
+        team_id: pending.team_id
+      });
       return { ok: true };
     });
 
@@ -390,7 +548,7 @@ export async function registerRoutes(app: FastifyInstance) {
           domain_id: uuid,
           team_id: uuid,
           revenue_wallet_id: uuid,
-          company_wallet_address: z.string(),
+          company_wallet_address: z.string().optional(),
           remarks: z.string().default(""),
           threshold_usd: optionalNumber,
           manager_percent: percent.nullable().optional(),
@@ -415,7 +573,9 @@ export async function registerRoutes(app: FastifyInstance) {
       }
       const insert = {
         ...values,
-        company_wallet_address: validateSolanaWalletAddress(values.company_wallet_address)
+        company_wallet_address: values.company_wallet_address
+          ? validateSolanaWalletAddress(values.company_wallet_address)
+          : null
       };
       const data = unwrap(await db.from("websites").insert(insert).select("*").single());
       unwrap(

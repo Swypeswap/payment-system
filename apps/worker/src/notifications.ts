@@ -79,3 +79,41 @@ export async function sendTeamPayoutMessage(team: {
   await channel.send(team.payout_message || "New payout for the team. GG! 💸 🎉");
   return true;
 }
+
+async function sendDiscordChannelMessage(
+  channelId: string | null | undefined,
+  content: string,
+  allowedMentions: { parse?: Array<"everyone">; users?: string[] } = {}
+) {
+  if (!discordClient || !channelId) return false;
+  const channel = await discordClient.channels.fetch(channelId);
+  if (!channel?.isTextBased() || !("send" in channel)) {
+    throw new Error("Configured Discord notification channel is not a text channel");
+  }
+  await channel.send({ content, allowedMentions });
+  return true;
+}
+
+export async function sendOwnersMessage(content: string, mentionEveryone = false) {
+  const settings = await db
+    .from("app_settings")
+    .select("owners_notifications_channel_id")
+    .eq("id", true)
+    .single();
+  if (settings.error) throw new Error(settings.error.message);
+  return sendDiscordChannelMessage(
+    settings.data.owners_notifications_channel_id,
+    content,
+    mentionEveryone ? { parse: ["everyone"] } : {}
+  );
+}
+
+export async function sendManagerMessage(
+  team: { payout_discord_channel_id?: string | null },
+  managerDiscordUserIds: string[],
+  content: string
+) {
+  return sendDiscordChannelMessage(team.payout_discord_channel_id, content, {
+    users: managerDiscordUserIds
+  });
+}

@@ -69,6 +69,7 @@ function overview() {
         <div class="stack">
           <span class="chip ${state.settings.emergency_paused ? "bad" : "good"}">${esc(status)}</span>
           <span class="chip ${state.settings.swaps_enabled ? "good" : "warn"}">SPL swaps ${state.settings.swaps_enabled ? "enabled" : "disabled"}</span>
+          <span class="chip ${state.settings.privacy_cash_enabled ? "good" : "warn"}">Privacy Cash ${state.settings.privacy_cash_enabled ? "enabled" : "disabled"}</span>
           <span class="chip">Global threshold: $${esc(state.settings.global_threshold_usd)}</span>
           <span class="chip">Wallet reserve: ${esc(state.settings.global_sol_reserve)} SOL</span>
         </div>
@@ -86,10 +87,7 @@ function websites() {
           <label>Domain<select name="domain_id" required>${option(pool, "id", "domain", "Choose pooled domain")}</select></label>
           <label>Team<select name="team_id" required>${option(state.teams.filter(t => t.active), "id", "name", "Choose team")}</select></label>
           <label>Revenue wallet<select name="revenue_wallet_id" required>${option(state.wallets.filter(w => w.active), "id", "label", "Choose wallet")}</select></label>
-          <label>Company wallet<input name="company_wallet_address" required placeholder="Solana wallet" /></label>
           <label>Threshold override<input name="threshold_usd" type="number" step="0.01" placeholder="Use global" /></label>
-          <label>Manager % override<input name="manager_percent" type="number" step="0.0001" placeholder="Use global" /></label>
-          <label>Company % override<input name="company_percent" type="number" step="0.0001" placeholder="Use global" /></label>
           <label>SOL reserve override<input name="sol_reserve" type="number" step="0.000000001" placeholder="Use global" /></label>
           <label class="full">Remarks<textarea name="remarks" placeholder="Internal or launch remarks"></textarea></label>
           <button class="full">Assign website</button>
@@ -109,10 +107,15 @@ function websites() {
 
 function teams() {
   return `<div class="grid two">
-    <article class="card"><h3>Add manager</h3><form id="manager-form" class="form-grid">
+    <article class="card"><h3>Add owner</h3><p><small>Each owner is linked to one Discord ID and can update only their own SOL payout wallet from the owners server.</small></p>
+      <form id="owner-form" class="form-grid"><label>Name<input name="display_name" required /></label>
+      <label>Discord user ID<input name="discord_user_id" required /></label><label>Discord username<input name="discord_username" /></label>
+      <label>Solana wallet<input name="solana_wallet_address" placeholder="Can be added by the owner later" /></label><button class="full">Add owner</button></form>
+      <div class="stack" style="margin-top:1rem">${state.owners.map(owner => `<div class="actions"><small>${esc(owner.display_name)} &middot; ${esc(owner.discord_user_id)} &middot; <code>${esc(short(owner.solana_wallet_address))}</code></small></div>`).join("") || "<small>No owner profiles yet.</small>"}</div>
+      <h3 style="margin-top:1.2rem">Add manager</h3><form id="manager-form" class="form-grid">
       <label>Name<input name="display_name" required /></label><label>Discord user ID<input name="discord_user_id" required /></label>
       <label>Discord username<input name="discord_username" /></label><button>Add manager</button></form>
-      <div class="stack" style="margin-top:1rem">${state.managers.map(manager => `<div class="actions"><small>${esc(manager.display_name)} · ${esc(manager.discord_user_id)}</small>${manager.active ? `<button class="small ghost danger" data-archive-manager="${manager.id}">Archive</button>` : '<small>Archived</small>'}</div>`).join("")}</div>
+      <div class="stack" style="margin-top:1rem">${state.managers.map(manager => `<div class="actions"><small>${esc(manager.display_name)} &middot; ${esc(manager.discord_user_id)}</small>${manager.active ? `<button class="small ghost danger" data-archive-manager="${manager.id}">Archive</button>` : '<small>Archived</small>'}</div>`).join("")}</div>
       <h3 style="margin-top:1.2rem">Add team</h3><form id="team-form" class="form-grid">
       <label>Name<input name="name" required /></label><label>Initial manager wallet<input name="manager_wallet_address" placeholder="Can be added later" /></label>
       <label>Team Discord channel ID<input name="payout_discord_channel_id" /></label><label class="full">Team payout message<input name="payout_message" value="New payout for the team. GG! 💸 🎉" /></label>
@@ -122,8 +125,13 @@ function teams() {
         <strong>${esc(team.name)}</strong> ${team.active ? '<span class="chip good">Active</span>' : '<span class="chip bad">Archived</span>'}
         <p><small>Wallet: <code>${esc(team.manager_wallet_address || "Not set")}</code><br />Channel: ${esc(team.payout_discord_channel_id || "Not set")}</small></p>
         <p><small>Managers: ${(team.team_managers || []).map((item) => esc(item.managers?.display_name)).join(", ") || "None"}</small></p>
-        <div class="actions"><button class="small ghost" data-assign-manager="${team.id}">Assign manager</button><button class="small ghost" data-remove-manager="${team.id}">Remove manager</button><button class="small ghost" data-team-wallet="${team.id}">Update wallet</button><button class="small ghost" data-team-channel="${team.id}">Edit message/channel</button>${team.active ? `<button class="small ghost danger" data-archive-team="${team.id}">Archive</button>` : ""}</div>
+        <div class="actions"><button class="small ghost" data-assign-manager="${team.id}">Assign manager</button><button class="small ghost" data-remove-manager="${team.id}">Remove manager</button><button class="small ghost" data-team-wallet="${team.id}">Request wallet update</button><button class="small ghost" data-team-channel="${team.id}">Edit message/channel</button>${team.active ? `<button class="small ghost danger" data-archive-team="${team.id}">Archive</button>` : ""}</div>
       </div>`).join("")}</div>
+      <h3 style="margin-top:1.2rem">Pending manager wallet requests</h3>
+      <div class="stack">${state.managerWalletRequests.filter(item => item.status === "pending").map(item => `<div class="card">
+        <strong>${esc(item.teams?.name)}</strong><p><small>Requested wallet: <code>${esc(short(item.new_wallet_address))}</code><br />Requested: ${date(item.created_at)}</small></p>
+        <div class="actions"><button class="small ghost" data-approve-manager-wallet="${item.id}">Approve</button><button class="small ghost danger" data-reject-manager-wallet="${item.id}">Reject</button></div>
+      </div>`).join("") || "<small>No pending requests.</small>"}</div>
     </article></div>`;
 }
 
@@ -165,8 +173,9 @@ function activityTable(items, type) {
 function activity() {
   return `<div class="grid two"><article class="card"><h3>Deposits</h3>${activityTable(state.deposits, "deposit")}</article>
     <article class="card"><h3>Payouts</h3>${activityTable(state.payouts, "payout")}</article>
+    <article class="card"><h3>Privacy Cash legs</h3>${activityTable(state.privacyCashWithdrawals, "withdrawal")}</article>
     <article class="card"><h3>Swap attempts</h3>${activityTable(state.swaps, "swap")}</article>
-    <article class="card"><h3>Website requests</h3>${state.websiteRequests.map(item => `<p><strong>${esc(item.teams?.name)}</strong> requested ${item.website_count} website(s)<br /><small>${esc(item.requested_by_username)} · ${date(item.created_at)}</small></p>`).join("") || "<small>No requests yet.</small>"}</article>
+    <article class="card"><h3>Website requests</h3>${state.websiteRequests.map(item => `<p><strong>${esc(item.teams?.name)}</strong> requested ${item.website_count} website(s)<br /><small>${esc(item.requested_by_username)} &middot; ${date(item.created_at)}</small></p>`).join("") || "<small>No requests yet.</small>"}</article>
     <article class="card full"><h3>Audit trail</h3><div class="table-wrap"><table><thead><tr><th>Time</th><th>Actor</th><th>Action</th><th>Entity</th></tr></thead><tbody>
     ${state.auditLogs.map(item => `<tr><td>${date(item.created_at)}</td><td>${esc(item.actor_type)}: ${esc(item.actor_id)}</td><td>${esc(item.action)}</td><td>${esc(item.entity_type)} ${esc(short(item.entity_id))}</td></tr>`).join("")}</tbody></table></div></article></div>`;
 }
@@ -175,15 +184,22 @@ function settings() {
   const s = state.settings;
   return `<article class="card"><h3>Global defaults and guardrails</h3><form id="settings-form" class="form-grid">
     <label>Threshold USD<input name="global_threshold_usd" type="number" step="0.01" value="${esc(s.global_threshold_usd)}" /></label>
-    <label>Manager %<input name="global_manager_percent" type="number" step="0.0001" value="${esc(s.global_manager_percent)}" /></label>
-    <label>Company %<input name="global_company_percent" type="number" step="0.0001" value="${esc(s.global_company_percent)}" /></label>
     <label>SOL reserve<input name="global_sol_reserve" type="number" step="0.000000001" value="${esc(s.global_sol_reserve)}" /></label>
     <label>Minimum swap USD<input name="min_swap_usd" type="number" step="0.01" value="${esc(s.min_swap_usd)}" /></label>
     <label>Max price impact %<input name="max_price_impact_pct" type="number" step="0.0001" value="${esc(s.max_price_impact_pct)}" /></label>
     <label>Minimum organic score<input name="min_organic_score" type="number" step="0.0001" value="${esc(s.min_organic_score)}" /></label>
+    <label>Minimum private delay hours<input name="privacy_min_delay_hours" type="number" min="24" step="1" value="${esc(s.privacy_min_delay_hours)}" /></label>
+    <label>Maximum private delay hours<input name="privacy_max_delay_hours" type="number" min="24" step="1" value="${esc(s.privacy_max_delay_hours)}" /></label>
+    <label>Owners Discord server ID<input name="owners_discord_guild_id" value="${esc(s.owners_discord_guild_id || "")}" /></label>
+    <label>Owners notification channel ID<input name="owners_notifications_channel_id" value="${esc(s.owners_notifications_channel_id || "")}" /></label>
+    <label>Rotate after days<input name="rotation_warn_after_days" type="number" min="1" step="1" value="${esc(s.rotation_warn_after_days)}" /></label>
+    <label>Rotate after payout legs<input name="rotation_warn_after_legs" type="number" min="1" step="1" value="${esc(s.rotation_warn_after_legs)}" /></label>
+    <label>Rotate after received USD<input name="rotation_warn_after_usd" type="number" min="1" step="0.01" value="${esc(s.rotation_warn_after_usd)}" /></label>
+    <label>Rotate after weekly legs<input name="rotation_warn_after_weekly_legs" type="number" min="1" step="1" value="${esc(s.rotation_warn_after_weekly_legs)}" /></label>
     <label>Manager role IDs<input name="discord_manager_role_ids" value="${esc((s.discord_manager_role_ids || []).join(","))}" placeholder="comma-separated" /></label>
     <label>Staff role IDs<input name="discord_staff_role_ids" value="${esc((s.discord_staff_role_ids || []).join(","))}" placeholder="comma-separated" /></label>
     <label><input name="swaps_enabled" type="checkbox" ${s.swaps_enabled ? "checked" : ""}/> Enable guarded SPL swaps</label>
+    <label><input name="privacy_cash_enabled" type="checkbox" ${s.privacy_cash_enabled ? "checked" : ""}/> Enable Privacy Cash SOL payouts</label>
     <label><input name="live_payouts_enabled" type="checkbox" ${s.live_payouts_enabled ? "checked" : ""}/> Enable live payouts</label>
     <label><input name="emergency_paused" type="checkbox" ${s.emergency_paused ? "checked" : ""}/> Emergency pause</label>
     <button class="full">Save settings</button>
@@ -239,6 +255,7 @@ document.addEventListener("submit", async (event) => {
     catch (error) { $("#login-error").textContent = error.message; }
   }
   if (event.target.id === "domain-form") mutate("/api/domains/import", "POST", values);
+  if (event.target.id === "owner-form") mutate("/api/owners", "POST", Object.fromEntries(Object.entries(values).filter(([, v]) => v !== "")));
   if (event.target.id === "manager-form") mutate("/api/managers", "POST", values);
   if (event.target.id === "team-form") mutate("/api/teams", "POST", Object.fromEntries(Object.entries(values).filter(([, v]) => v !== "")));
   if (event.target.id === "assign-manager-form") {
@@ -249,15 +266,18 @@ document.addEventListener("submit", async (event) => {
   if (event.target.id === "route-form") mutate("/api/notification-routes", "POST", { ...values, team_id: values.team_id || null, enabled: true });
   if (event.target.id === "website-form") mutate("/api/websites", "POST", {
     ...values,
-    threshold_usd: optionalNumeric(values.threshold_usd), manager_percent: optionalNumeric(values.manager_percent),
-    company_percent: optionalNumeric(values.company_percent), sol_reserve: optionalNumeric(values.sol_reserve)
+    threshold_usd: optionalNumeric(values.threshold_usd), sol_reserve: optionalNumeric(values.sol_reserve)
   });
   if (event.target.id === "settings-form") mutate("/api/settings", "PUT", {
-    global_threshold_usd: Number(values.global_threshold_usd), global_manager_percent: Number(values.global_manager_percent),
-    global_company_percent: Number(values.global_company_percent), global_sol_reserve: Number(values.global_sol_reserve),
+    global_threshold_usd: Number(values.global_threshold_usd), global_sol_reserve: Number(values.global_sol_reserve),
     min_swap_usd: Number(values.min_swap_usd), max_price_impact_pct: Number(values.max_price_impact_pct),
     min_organic_score: Number(values.min_organic_score), discord_manager_role_ids: splitIds(values.discord_manager_role_ids),
-    discord_staff_role_ids: splitIds(values.discord_staff_role_ids), swaps_enabled: event.target.swaps_enabled.checked,
+    discord_staff_role_ids: splitIds(values.discord_staff_role_ids), privacy_cash_enabled: event.target.privacy_cash_enabled.checked,
+    privacy_min_delay_hours: Number(values.privacy_min_delay_hours), privacy_max_delay_hours: Number(values.privacy_max_delay_hours),
+    owners_discord_guild_id: values.owners_discord_guild_id || null, owners_notifications_channel_id: values.owners_notifications_channel_id || null,
+    rotation_warn_after_days: Number(values.rotation_warn_after_days), rotation_warn_after_legs: Number(values.rotation_warn_after_legs),
+    rotation_warn_after_usd: Number(values.rotation_warn_after_usd), rotation_warn_after_weekly_legs: Number(values.rotation_warn_after_weekly_legs),
+    swaps_enabled: event.target.swaps_enabled.checked,
     live_payouts_enabled: event.target.live_payouts_enabled.checked, emergency_paused: event.target.emergency_paused.checked
   });
 });
@@ -274,8 +294,10 @@ document.addEventListener("click", async (event) => {
   if (button.dataset.archiveWallet && confirm("Archive this revenue wallet? Existing website assignments will remain active until changed.")) mutate(`/api/wallets/${button.dataset.archiveWallet}`, "DELETE");
   if (button.dataset.testRoute) mutate(`/api/notification-routes/${button.dataset.testRoute}/test`, "POST");
   if (button.dataset.deleteRoute && confirm("Remove this webhook route?")) mutate(`/api/notification-routes/${button.dataset.deleteRoute}`, "DELETE");
+  if (button.dataset.approveManagerWallet && confirm("Approve this manager payout wallet?")) mutate(`/api/manager-wallet-requests/${button.dataset.approveManagerWallet}/approved`, "POST");
+  if (button.dataset.rejectManagerWallet && confirm("Reject this manager payout wallet?")) mutate(`/api/manager-wallet-requests/${button.dataset.rejectManagerWallet}/rejected`, "POST");
   if (button.dataset.teamWallet) {
-    const wallet = prompt("New manager payout wallet for this team:");
+    const wallet = prompt("Request a new manager payout wallet for this team:");
     if (wallet) mutate(`/api/teams/${button.dataset.teamWallet}`, "PUT", { manager_wallet_address: wallet });
   }
   if (button.dataset.assignManager) openAssignManagerDialog(button.dataset.assignManager);
@@ -295,23 +317,16 @@ document.addEventListener("click", async (event) => {
   }
   if (button.dataset.editWebsite) {
     const website = state.websites.find(w => w.id === button.dataset.editWebsite);
-    const company_wallet_address = prompt("Company wallet:", website.company_wallet_address || "");
-    if (company_wallet_address === null) return;
     const wallets = state.wallets.filter(w => w.active).map(w => `${w.label}: ${w.id}`).join("\n");
     const revenue_wallet_id = prompt(`Revenue wallet ID:\n\n${wallets}`, website.revenue_wallet_id);
     if (revenue_wallet_id === null) return;
     const threshold_usd = prompt("Threshold USD override (blank uses global):", website.threshold_usd ?? "");
     if (threshold_usd === null) return;
-    const manager_percent = prompt("Manager % override (blank uses global):", website.manager_percent ?? "");
-    if (manager_percent === null) return;
-    const company_percent = prompt("Company % override (blank uses global):", website.company_percent ?? "");
-    if (company_percent === null) return;
     const sol_reserve = prompt("SOL reserve override (blank uses global):", website.sol_reserve ?? "");
     if (sol_reserve === null) return;
     const remarks = prompt("Website remarks:", website.remarks || "");
     if (remarks !== null) mutate(`/api/websites/${website.id}`, "PUT", {
-      company_wallet_address, revenue_wallet_id, threshold_usd: optionalNumeric(threshold_usd),
-      manager_percent: optionalNumeric(manager_percent), company_percent: optionalNumeric(company_percent),
+      revenue_wallet_id, threshold_usd: optionalNumeric(threshold_usd),
       sol_reserve: optionalNumeric(sol_reserve), remarks
     });
   }
