@@ -5,6 +5,8 @@ import {
   NOTIFICATION_KINDS,
   encryptSecret,
   parseSecretKey,
+  parseDomain,
+  toHttpsWebsiteUrl,
   validateSolanaWalletAddress
 } from "@payment/shared";
 import { z } from "zod";
@@ -17,21 +19,6 @@ import { createSessionToken, dashboardCookie, isValidSession } from "./session.j
 const uuid = z.string().uuid();
 const optionalNumber = z.number().nonnegative().nullable().optional();
 const percent = z.number().min(0).max(100);
-
-function parseDomain(value: string): string {
-  let domain = value.trim().toLowerCase();
-  if (!domain) {
-    throw new Error("Domain cannot be empty");
-  }
-  if (domain.includes("://")) {
-    domain = new URL(domain).hostname;
-  }
-  domain = domain.replace(/\/.*$/, "").replace(/\.$/, "");
-  if (!/^(?=.{1,253}$)([a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/.test(domain)) {
-    throw new Error(`Invalid domain: ${value}`);
-  }
-  return domain;
-}
 
 function getHeliusSignature(payload: Record<string, unknown>): string | undefined {
   if (typeof payload.signature === "string") {
@@ -477,10 +464,10 @@ export async function registerRoutes(app: FastifyInstance) {
       const previous = unwrap(
         await db
           .from("websites")
-          .select("hosted,team_id,domains(domain)")
+          .select("hosted,team_id,remarks,domains(domain)")
           .eq("id", id)
           .single()
-      ) as { hosted: boolean; team_id: string; domains: { domain: string } };
+      ) as { hosted: boolean; team_id: string; remarks: string; domains: { domain: string } };
       const update = {
         ...values,
         company_wallet_address: values.company_wallet_address
@@ -490,6 +477,9 @@ export async function registerRoutes(app: FastifyInstance) {
       unwrap(await db.from("websites").update(update).eq("id", id).select("id").single());
       await audit("website.updated", "website", id, values);
       if (values.hosted === true && previous.hosted === false) {
+        const websiteUrl = toHttpsWebsiteUrl(previous.domains.domain);
+        const teamId = values.team_id ?? previous.team_id;
+        const remarks = values.remarks ?? previous.remarks;
         await sendWebhook(
           "website_activation",
           {
@@ -497,15 +487,18 @@ export async function registerRoutes(app: FastifyInstance) {
             embeds: [
               {
                 title: "Website activated",
+                url: websiteUrl,
+                description: websiteUrl,
                 color: 0x22c55e,
-                fields: [
-                  { name: "Domain", value: previous.domains.domain },
-                  { name: "Remarks", value: values.remarks || "No remarks" }
-                ]
+              },
+              {
+                title: "Remarks",
+                description: remarks || "No remarks",
+                color: 0x64f5b5
               }
             ]
           },
-          { teamId: values.team_id ?? previous.team_id, mentionEveryone: true }
+          { teamId, mentionEveryone: true }
         );
       }
       return { ok: true };

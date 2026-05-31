@@ -1,4 +1,10 @@
-import { decryptSecret, encryptSecret, type NotificationKind } from "@payment/shared";
+import {
+  CONFETTI_WEBHOOK_AVATAR_URL,
+  CONFETTI_WEBHOOK_NAMES,
+  decryptSecret,
+  encryptSecret,
+  type NotificationKind
+} from "@payment/shared";
 import { db, unwrap } from "./db.js";
 import { env } from "./env.js";
 
@@ -75,6 +81,8 @@ export async function sendWebhook(
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
       ...payload,
+      username: CONFETTI_WEBHOOK_NAMES[kind],
+      avatar_url: CONFETTI_WEBHOOK_AVATAR_URL,
       allowed_mentions: {
         parse: options.mentionEveryone ? ["everyone"] : []
       }

@@ -1,4 +1,9 @@
-import { decryptSecret, type NotificationKind } from "@payment/shared";
+import {
+  CONFETTI_WEBHOOK_AVATAR_URL,
+  CONFETTI_WEBHOOK_NAMES,
+  decryptSecret,
+  type NotificationKind
+} from "@payment/shared";
 import type { Client } from "discord.js";
 import { db } from "./db.js";
 import { env } from "./env.js";
@@ -51,7 +56,12 @@ export async function sendRoute(
   const response = await fetch(url, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ ...payload, allowed_mentions: { parse: [] } })
+    body: JSON.stringify({
+      ...payload,
+      username: CONFETTI_WEBHOOK_NAMES[kind],
+      avatar_url: CONFETTI_WEBHOOK_AVATAR_URL,
+      allowed_mentions: { parse: [] }
+    })
   });
   if (!response.ok) throw new Error(`Discord webhook failed with HTTP ${response.status}`);
   return true;

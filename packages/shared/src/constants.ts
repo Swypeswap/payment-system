@@ -12,3 +12,14 @@ export const NOTIFICATION_KINDS = [
 ] as const;
 
 export type NotificationKind = (typeof NOTIFICATION_KINDS)[number];
+
+export const CONFETTI_WEBHOOK_AVATAR_URL = "https://files.catbox.moe/kxol69.png";
+
+export const CONFETTI_WEBHOOK_NAMES: Record<NotificationKind, string> = {
+  website_request: "Confetti Website Request",
+  website_activation: "Confetti Website Activated",
+  deposit: "Confetti Deposit",
+  payout: "Confetti Payout",
+  security_alert: "Confetti Security Alert",
+  worker_error: "Confetti Worker Error"
+};

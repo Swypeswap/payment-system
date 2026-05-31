@@ -3,9 +3,13 @@ import test from "node:test";
 import { Keypair } from "@solana/web3.js";
 import {
   decryptSecret,
+  CONFETTI_WEBHOOK_AVATAR_URL,
+  CONFETTI_WEBHOOK_NAMES,
   effectiveWebsiteSettings,
   encryptSecret,
+  parseDomain,
   parseSecretKey,
+  toHttpsWebsiteUrl,
   validateSolanaWalletAddress
 } from "./index.js";
 
@@ -49,4 +53,21 @@ test("resolves website overrides and validates percentages", () => {
   );
   assert.equal(settings.thresholdUsd, 250);
   assert.equal(settings.managerPercent, 10);
+});
+
+test("uses the configured Confetti identity for Discord webhook messages", () => {
+  assert.equal(CONFETTI_WEBHOOK_NAMES.website_request, "Confetti Website Request");
+  assert.equal(CONFETTI_WEBHOOK_NAMES.website_activation, "Confetti Website Activated");
+  assert.equal(CONFETTI_WEBHOOK_NAMES.deposit, "Confetti Deposit");
+  assert.equal(CONFETTI_WEBHOOK_NAMES.payout, "Confetti Payout");
+  assert.equal(CONFETTI_WEBHOOK_NAMES.security_alert, "Confetti Security Alert");
+  assert.equal(CONFETTI_WEBHOOK_NAMES.worker_error, "Confetti Worker Error");
+  assert.equal(CONFETTI_WEBHOOK_AVATAR_URL, "https://files.catbox.moe/kxol69.png");
+});
+
+test("normalizes website domains and activation URLs", () => {
+  assert.equal(parseDomain("Example.COM"), "example.com");
+  assert.equal(parseDomain("https://Example.COM/launch"), "example.com");
+  assert.equal(toHttpsWebsiteUrl("example.com"), "https://example.com");
+  assert.equal(toHttpsWebsiteUrl("https://Example.COM/launch"), "https://example.com");
 });
