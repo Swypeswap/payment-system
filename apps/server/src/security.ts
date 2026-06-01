@@ -1,4 +1,5 @@
 import type { FastifyRequest } from "fastify";
+import { createHash, randomBytes, randomInt } from "node:crypto";
 import { isIP } from "node:net";
 import { db } from "./db.js";
 import { env } from "./env.js";
@@ -29,6 +30,12 @@ interface SupabaseSignal {
 
 const privacyCache = new Map<string, { expiresAt: number; signals: PrivacySignals | null }>();
 const CACHE_MS = 60 * 60 * 1000;
+const LOCKDOWN_CACHE_MS = 1000;
+const NETWORK_BLOCK_MIN_SECONDS = 96 * 60 * 60;
+const NETWORK_BLOCK_MAX_SECONDS = 5 * 7 * 24 * 60 * 60;
+const DISTRIBUTED_BLOCK_WINDOW_MS = 15 * 60 * 1000;
+const DISTRIBUTED_BLOCK_THRESHOLD = 3;
+let lockdownCache: { active: boolean; expiresAt: number } | null = null;
 
 function truncate(value: unknown, max = 1024): string {
   const text = String(value ?? "-");
@@ -140,6 +147,45 @@ function auditSecurityEvent(action: string, context: SecurityContext, metadata: 
     });
 }
 
+function auditOperationalSecurityEvent(action: string, metadata: Record<string, unknown>) {
+  void db
+    .from("audit_logs")
+    .insert({
+      actor_type: "security",
+      actor_id: "vps-security-ops",
+      action,
+      entity_type: "security_event",
+      metadata
+    })
+    .then(({ error }) => {
+      if (error) {
+        console.error("Could not record operational security audit event", error.message);
+      }
+    });
+}
+
+async function sendOperationalSecurityAlert(
+  title: string,
+  metadata: Record<string, unknown>
+) {
+  auditOperationalSecurityEvent(`security.${String(metadata.event ?? "operational_alert")}`, metadata);
+  const delivered = await sendWebhook("security_alert", {
+    content: "@everyone",
+    embeds: [{
+      title,
+      color: 0xff315f,
+      timestamp: new Date().toISOString(),
+      fields: Object.entries(metadata).map(([name, value]) => ({
+        name: truncate(name, 256),
+        value: truncate(value)
+      }))
+    }]
+  }, { mentionEveryone: true });
+  if (!delivered) {
+    throw new Error("Global security_alert webhook route is not configured");
+  }
+}
+
 export async function sendDashboardSecurityAlert(
   request: FastifyRequest,
   title: string,
@@ -230,6 +276,114 @@ export async function sendSupabaseSecurityAlerts(logs: unknown[]): Promise<numbe
     }, { mentionEveryone: true });
   }
   return signals.length;
+}
+
+function recoveryCode(prefix: string) {
+  return `${prefix}_${randomBytes(32).toString("base64url")}`;
+}
+
+function recoveryCodeHash(code: string) {
+  return createHash("sha256").update(code).digest("hex");
+}
+
+export function randomDashboardNetworkBlockSeconds() {
+  return randomInt(NETWORK_BLOCK_MIN_SECONDS, NETWORK_BLOCK_MAX_SECONDS + 1);
+}
+
+export async function issueNetworkUnblockRecoveryCode(
+  networkKey: string,
+  expiresAt: string
+) {
+  const code = recoveryCode("confetti-network");
+  const result = await db.rpc("issue_security_recovery_token", {
+    requested_action: "network_unblock",
+    requested_network_key: networkKey,
+    requested_token_hash: recoveryCodeHash(code),
+    requested_expires_at: expiresAt
+  });
+  if (result.error) throw new Error(result.error.message);
+  return result.data === true ? code : null;
+}
+
+export async function isFrontendLockdownActive(options: { fresh?: boolean } = {}) {
+  const now = Date.now();
+  if (!options.fresh && lockdownCache && lockdownCache.expiresAt > now) {
+    return lockdownCache.active;
+  }
+  const result = await db
+    .from("frontend_lockdown_state")
+    .select("active")
+    .eq("id", true)
+    .single();
+  if (result.error) throw new Error(result.error.message);
+  lockdownCache = { active: result.data.active === true, expiresAt: now + LOCKDOWN_CACHE_MS };
+  return lockdownCache.active;
+}
+
+export async function activateFrontendLockdown(reason: string, actor: string) {
+  const code = recoveryCode("confetti-lockdown");
+  const result = await db.rpc("activate_frontend_lockdown", {
+    requested_reason: reason,
+    requested_actor: actor,
+    requested_token_hash: recoveryCodeHash(code)
+  });
+  if (result.error) throw new Error(result.error.message);
+  if (result.data !== true) return false;
+
+  lockdownCache = { active: true, expiresAt: Date.now() + LOCKDOWN_CACHE_MS };
+  await sendOperationalSecurityAlert("Confetti frontend lockdown activated", {
+    event: "frontend_lockdown_activated",
+    severity: "critical",
+    reason,
+    actor,
+    recovery_code: code,
+    instructions: "On the VPS, run: docker compose exec -it server npm --prefix apps/server run security:ops"
+  });
+  return true;
+}
+
+export async function maybeActivateFrontendLockdownForDistributedLoginAttack() {
+  const result = await db
+    .from("dashboard_network_blocks")
+    .select("network_key", { count: "exact", head: true })
+    .gt("blocked_until", new Date().toISOString())
+    .gte("updated_at", new Date(Date.now() - DISTRIBUTED_BLOCK_WINDOW_MS).toISOString());
+  if (result.error) throw new Error(result.error.message);
+  if ((result.count ?? 0) < DISTRIBUTED_BLOCK_THRESHOLD) return false;
+
+  return activateFrontendLockdown(
+    `${result.count} distinct dashboard networks were blocked within 15 minutes`,
+    "automatic-distributed-login-defense"
+  );
+}
+
+export async function redeemSecurityRecoveryCode(code: string) {
+  const result = await db.rpc("redeem_security_recovery_token", {
+    requested_token_hash: recoveryCodeHash(code.trim())
+  });
+  if (result.error) throw new Error(result.error.message);
+  const recovery = Array.isArray(result.data) ? result.data[0] : result.data;
+  if (!recovery) throw new Error("Recovery code did not return an action");
+
+  if (recovery.redeemed_action === "frontend_unlock") {
+    lockdownCache = { active: false, expiresAt: Date.now() + LOCKDOWN_CACHE_MS };
+    await sendOperationalSecurityAlert("Confetti frontend lockdown revoked", {
+      event: "frontend_lockdown_revoked",
+      severity: "warning",
+      actor: "interactive-vps-recovery"
+    });
+  } else if (recovery.redeemed_action === "network_unblock") {
+    await sendOperationalSecurityAlert("Dashboard network block revoked", {
+      event: "dashboard_network_block_revoked",
+      severity: "warning",
+      actor: "interactive-vps-recovery",
+      network: recovery.redeemed_network_key
+    });
+  } else {
+    throw new Error("Recovery code returned an unsupported action");
+  }
+
+  return recovery as { redeemed_action: "frontend_unlock" | "network_unblock"; redeemed_network_key: string | null };
 }
 
 function normalizeIp(ip: string) {

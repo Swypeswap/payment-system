@@ -182,7 +182,7 @@ function wallets() {
   ].filter((group) => group.wallets.length);
   const rowsFor = (group) => group.wallets.map((wallet) => `
     <tr>
-      <td><span class="color-dot" style="--label-color:${esc(validColor(wallet.color_label, group.color_label))}"></span><strong>${esc(wallet.label)}</strong></td>
+      <td><span class="labeled-value"><span class="color-dot" style="--label-color:${esc(validColor(wallet.color_label, group.color_label))}"></span><strong>${esc(wallet.label)}</strong></span></td>
       <td><code>${esc(wallet.address)}</code></td>
       <td>${wallet.active ? '<span class="chip good">Active</span>' : '<span class="chip bad">Archived</span>'}</td>
       <td><div class="actions">
@@ -257,7 +257,7 @@ function domains() {
   ].filter((group) => group.domains.length);
   const rowsFor = (group) => group.domains.map((domain) => `
     <tr>
-      <td><span class="color-dot" style="--label-color:${esc(validColor(domain.color_label, group.color_label))}"></span><strong>${esc(domain.domain)}</strong></td>
+      <td><span class="labeled-value"><span class="color-dot" style="--label-color:${esc(validColor(domain.color_label, group.color_label))}"></span><strong>${esc(domain.domain)}</strong></span></td>
       <td><span class="chip ${domain.status === "archived" ? "bad" : domain.status === "assigned" ? "warn" : "good"}">${esc(domain.status)}</span></td>
       <td><div class="actions">
         <button class="small ghost" data-edit-domain="${domain.id}">Edit</button>

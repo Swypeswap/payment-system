@@ -13,7 +13,8 @@ The checked-in defaults do not move money:
 - The encryption master key stays in the Ubuntu `.env` file and must never be stored in Supabase.
 - Revenue wallets can be grouped and color-labeled. CSV exports contain metadata only; per-wallet private-key downloads are password-confirmed, explicit audited actions.
 - Domains can be grouped, color-labeled, archived, restored, and permanently deleted when they have no website history.
-- Dashboard login attempts are rate-limited. Two failed passwords within 15 minutes block the public IPv4 address or IPv6 `/64` network for 24 hours, and security alerts can be delivered through the global `security_alert` Discord webhook route.
+- Dashboard login attempts are rate-limited. Two failed passwords within 15 minutes block the public IPv4 address or IPv6 `/64` network for a randomized 96-hour to five-week period, and security alerts can be delivered through the global `security_alert` Discord webhook route.
+- Network blocks include a one-time VPS recovery code in the owners security webhook. Three distinct blocked networks within 15 minutes automatically place only the frontend into lockdown while Helius ingestion, Supabase log ingestion, health checks, and the payout worker continue running.
 - Incoming Helius events and submitted payouts are deduplicated.
 - Submitted payout transactions are stored and recovered after worker restarts.
 - Suspicious, unpriced, unroutable, or high-impact tokens are quarantined instead of swapped.
@@ -137,6 +138,14 @@ Fill the remaining Supabase, Discord, Helius, Jupiter, domain, and RPC values fr
 
 The receiver raises alerts for authentication failures, permission failures, and privileged database changes. Supabase API logs may include an IP address and user agent. Direct Postgres activity does not provide browser device details, so those fields are reported as unavailable when the drained event does not contain them. Enable and tune [Supabase pgAudit](https://supabase.com/docs/guides/database/extensions/pgaudit) separately if you need deeper database activity logging.
 
+Treat the owners security webhook channel as sensitive. Its one-time recovery codes are randomly generated 256-bit bearer secrets. Supabase stores only SHA-256 hashes of those codes. Use the interactive VPS command to redeem a network-unblock or frontend-unlock code:
+
+```bash
+docker compose exec -it server npm --prefix apps/server run security:ops
+```
+
+The same command can manually place the frontend into complete lockdown. During lockdown, the dashboard HTML, assets, login endpoint, and dashboard APIs return a minimal `503`. Background payout processing remains separate and continues running. Redeeming a code sends a new owners security webhook alert.
+
 For local development, install every package with:
 
 ```powershell
@@ -171,6 +180,8 @@ In the dashboard:
 6. Assign a domain, team, revenue wallet, and optional website overrides.
 7. Toggle **Hosted** for the website.
 8. Keep the emergency pause enabled initially.
+
+The top-right `PAUSED` badge means **Emergency pause** is enabled. To leave the safe default, open **Settings**, uncheck **Emergency pause**, and save. The badge changes to `DRY RUN` or `LIVE` depending on the other payout switches and Ubuntu `DRY_RUN`.
 
 ## 7. Verify Before Mainnet
 

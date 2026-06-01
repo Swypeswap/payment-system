@@ -15,7 +15,15 @@ import { audit } from "./audit.js";
 import { db, unwrap } from "./db.js";
 import { env } from "./env.js";
 import { encryptWebhookUrl, listRedactedRoutes, sendWebhook } from "./notifications.js";
-import { dashboardNetworkKey, sendDashboardSecurityAlert, sendSupabaseSecurityAlerts, supabaseLogsFrom } from "./security.js";
+import {
+  dashboardNetworkKey,
+  issueNetworkUnblockRecoveryCode,
+  maybeActivateFrontendLockdownForDistributedLoginAttack,
+  randomDashboardNetworkBlockSeconds,
+  sendDashboardSecurityAlert,
+  sendSupabaseSecurityAlerts,
+  supabaseLogsFrom
+} from "./security.js";
 import { createSessionToken, dashboardCookie, isValidSession } from "./session.js";
 
 const uuid = z.string().uuid();
@@ -64,7 +72,8 @@ async function recordDashboardLoginFailure(networkKey: string, ip: string) {
   return unwrap(
     await db.rpc("record_dashboard_login_failure", {
       requested_network_key: networkKey,
-      requested_ip: ip
+      requested_ip: ip,
+      requested_block_seconds: randomDashboardNetworkBlockSeconds()
     })
   ) as DashboardNetworkBlock;
 }
@@ -214,13 +223,25 @@ export async function registerRoutes(app: FastifyInstance) {
       const { password } = z.object({ password: z.string().min(1) }).parse(request.body);
       if (!(await bcrypt.compare(password, env.DASHBOARD_PASSWORD_HASH))) {
         const failures = await recordDashboardLoginFailure(networkKey, request.ip);
+        const recoveryCode = failures.blocked_until
+          ? await issueNetworkUnblockRecoveryCode(networkKey, failures.blocked_until)
+          : null;
         sendSecurityAlert(request, failures.blocked_until ? "Dashboard login blocked after repeated failures" : "Dashboard login failed", {
           event: failures.blocked_until ? "login_blocked" : "login_failed",
           severity: failures.blocked_until ? "high" : "warning",
           network: networkKey,
           failed_attempts: failures.failed_attempts,
-          blocked_until: failures.blocked_until ?? "Not blocked"
+          blocked_until: failures.blocked_until ?? "Not blocked",
+          ...(recoveryCode ? {
+            recovery_code: recoveryCode,
+            instructions: "On the VPS, run: docker compose exec -it server npm --prefix apps/server run security:ops"
+          } : {})
         });
+        if (failures.blocked_until) {
+          void maybeActivateFrontendLockdownForDistributedLoginAttack().catch((error) => {
+            request.log.warn({ error }, "Could not evaluate automatic frontend lockdown");
+          });
+        }
         return failures.blocked_until
           ? reply.code(429).send({ error: "Too many failed login attempts. Try again later." })
           : reply.code(401).send({ error: "Invalid password" });

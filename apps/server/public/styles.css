@@ -30,6 +30,10 @@ button.danger { color: var(--danger); }
 button.danger-action { background: var(--danger); color: #27080d; }
 button.small { padding: 0.42rem 0.62rem; font-size: 0.78rem; }
 input, select, textarea { width: 100%; background: rgba(7, 7, 8, 0.92); border: 1px solid var(--line); color: var(--text); border-radius: 0.6rem; padding: 0.7rem; }
+input[type="color"] { height: 2.7rem; padding: 0.28rem; }
+input[type="color"]::-webkit-color-swatch-wrapper { padding: 0; }
+input[type="color"]::-webkit-color-swatch { border: 0; border-radius: 0.35rem; }
+input[type="color"]::-moz-color-swatch { border: 0; border-radius: 0.35rem; }
 textarea { min-height: 6rem; resize: vertical; }
 label { display: grid; gap: 0.38rem; color: var(--muted); font-size: 0.82rem; }
 small { color: var(--muted); }
@@ -77,6 +81,7 @@ td code { color: var(--accent); font-size: 0.72rem; }
 .wallet-group-summary { justify-content: flex-start; }
 .wallet-group-summary button { margin-left: auto; }
 .color-dot { display: inline-block; width: 0.72rem; height: 0.72rem; flex: 0 0 auto; border-radius: 50%; background: var(--label-color, var(--wallet-group-color, var(--accent))); box-shadow: 0 0 0 0.2rem rgba(255, 255, 255, 0.04); }
+.labeled-value { display: inline-flex; align-items: center; gap: 0.45rem; }
 .segmented { display: inline-flex; gap: 0.25rem; padding: 0.24rem; border: 1px solid var(--line); border-radius: 0.8rem; background: rgba(7, 7, 8, 0.9); }
 .segmented button { background: transparent; color: var(--muted); padding: 0.5rem 0.75rem; }
 .segmented button.active { background: linear-gradient(135deg, rgba(255, 49, 95, 0.24), rgba(37, 27, 42, 0.78)); color: #ff8daa; }
