@@ -156,6 +156,36 @@ async function recordSwap(
   if (error) throw new Error(error.message);
 }
 
+async function recordBalanceSnapshot(
+  website: WebsiteRow,
+  solLamports: bigint,
+  tokenBalances: TokenBalance[]
+) {
+  let solUsdPrice: number | null = null;
+  try {
+    solUsdPrice = await getSolUsdPrice();
+  } catch {
+    // Balance snapshots remain useful when the price service is temporarily unavailable.
+  }
+  unwrap(
+    await db
+      .from("wallet_balance_snapshots")
+      .insert({
+        website_id: website.id,
+        revenue_wallet_id: website.revenue_wallet_id,
+        sol_lamports: solLamports.toString(),
+        token_balances: tokenBalances,
+        sol_usd_price: solUsdPrice,
+        estimated_sol_value_usd: solUsdPrice === null
+          ? null
+          : Number(solLamports) / LAMPORTS_PER_SOL * solUsdPrice
+      })
+      .select("id")
+      .single()
+  );
+  return solUsdPrice;
+}
+
 async function quarantineToken(
   website: WebsiteRow,
   token: TokenBalance,
@@ -536,12 +566,13 @@ async function shieldAssetIfEligible(
   signer: Keypair,
   sourceBalanceRaw: bigint,
   reserveRaw: bigint,
-  settings: ReturnType<typeof effectiveWebsiteSettings>
+  settings: ReturnType<typeof effectiveWebsiteSettings>,
+  solUsdPrice?: number | null
 ) {
   if (!settings.privacyCashEnabled) return;
   const available = sourceBalanceRaw - reserveRaw;
   if (available <= 0n) return;
-  const usd = Number(available) / LAMPORTS_PER_SOL * await getSolUsdPrice();
+  const usd = Number(available) / LAMPORTS_PER_SOL * (solUsdPrice ?? await getSolUsdPrice());
   if (usd < settings.thresholdUsd) return;
   if (!website.teams.manager_wallet_address) {
     throw new Error("Team manager payout wallet is not configured");
@@ -626,18 +657,7 @@ export async function processWebsite(websiteId: string) {
     const signer = getSigner(website);
     let tokenBalances = await getTokenBalances(signer.publicKey);
     let solLamports = BigInt(await connection.getBalance(signer.publicKey, "confirmed"));
-    unwrap(
-      await db
-        .from("wallet_balance_snapshots")
-        .insert({
-          website_id: website.id,
-          revenue_wallet_id: website.revenue_wallet_id,
-          sol_lamports: solLamports.toString(),
-          token_balances: tokenBalances
-        })
-        .select("id")
-        .single()
-    );
+    let solUsdPrice = await recordBalanceSnapshot(website, solLamports, tokenBalances);
     if (settings.emergencyPaused) return;
     if (settings.swapsEnabled) {
       for (const token of tokenBalances) {
@@ -654,11 +674,12 @@ export async function processWebsite(websiteId: string) {
       }
       tokenBalances = await getTokenBalances(signer.publicKey);
       solLamports = BigInt(await connection.getBalance(signer.publicKey, "confirmed"));
+      solUsdPrice = await recordBalanceSnapshot(website, solLamports, tokenBalances);
     }
     const reserveLamports =
       BigInt(Math.ceil(settings.solReserve * LAMPORTS_PER_SOL)) +
       BigInt(PAYOUT_FEE_BUFFER_LAMPORTS);
-    await shieldAssetIfEligible(website, signer, solLamports, reserveLamports, settings);
+    await shieldAssetIfEligible(website, signer, solLamports, reserveLamports, settings, solUsdPrice);
   } catch (error) {
     await workerAudit("website.processing_failed", "website", websiteId, {
       error: error instanceof Error ? error.message : String(error)
@@ -683,6 +704,41 @@ export async function reconcileAllWebsites() {
     await db.from("websites").select("id").eq("active", true).eq("hosted", true)
   ) as Array<{ id: string }>;
   for (const website of websites) await processWebsite(website.id);
+}
+
+export async function processManualReconciliationRequests() {
+  const requests = unwrap(
+    await db.rpc("claim_manual_reconciliation_request", {
+      requested_worker_id: env.WORKER_ID
+    })
+  ) as Array<{ id: string }>;
+  for (const request of requests) {
+    try {
+      await reconcileAllWebsites();
+      unwrap(
+        await db
+          .from("manual_reconciliation_requests")
+          .update({ status: "succeeded", completed_at: new Date().toISOString(), error: null })
+          .eq("id", request.id)
+          .select("id")
+          .single()
+      );
+      await workerAudit("privacy_cash.manual_reconciliation_completed", "manual_reconciliation_request", request.id);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      unwrap(
+        await db
+          .from("manual_reconciliation_requests")
+          .update({ status: "failed", completed_at: new Date().toISOString(), error: message })
+          .eq("id", request.id)
+          .select("id")
+          .single()
+      );
+      await workerAudit("privacy_cash.manual_reconciliation_failed", "manual_reconciliation_request", request.id, {
+        error: message
+      });
+    }
+  }
 }
 
 async function sendPrivacyCashPayoutNotifications(

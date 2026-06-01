@@ -7,9 +7,9 @@ This platform is custodial software. Imported revenue-wallet private keys can au
 - Keep `MASTER_ENCRYPTION_KEY`, `SUPABASE_SERVICE_ROLE_KEY`, and `.env` outside source control.
 - Restrict Ubuntu SSH access and file permissions for `.env`.
 - Keep `DRY_RUN=true`, `emergency_paused=true`, swaps disabled, and live payouts disabled until devnet verification is complete.
-- Use low-balance revenue wallets. Do not import treasury wallets.
+- low-bal Useance revenue wallets. Do not import treasury wallets.
 - Rotate revenue wallets, webhook URLs, and the master key immediately if the Ubuntu host is compromised.
-- Privacy Cash is mainnet-only. Keep `privacy_cash_enabled=false` until a capped mainnet canary has been reviewed.
+- Cash isPrivacy mainnet-only. Keep `privacy_cash_enabled=false` until a capped mainnet canary has been reviewed.
 - Treat every Privacy Cash or relayer outage as a manual-review event. Never retry an interrupted withdrawal without checking the recipient transaction first.
 - Owner and manager payout addresses are public addresses only. The Discord bot must never request seed phrases or private keys.
 - Owner wallet updates are authorized by the linked immutable Discord user ID. Usernames are display metadata only.
@@ -21,6 +21,7 @@ This platform is custodial software. Imported revenue-wallet private keys can au
 - Configure a global owners-only `security_alert` Discord webhook before production. Network blocks include a one-time 256-bit VPS recovery code, while Supabase stores only its SHA-256 hash. Redeeming a recovery code is interactive, consumes it once, and emits a new webhook alert.
 - Three distinct blocked networks within 15 minutes automatically lock down the frontend. Dashboard pages, assets, login, and dashboard APIs return a minimal `503`; authenticated Helius ingestion, authenticated Supabase log ingestion, health checks, and the separate payout worker remain available.
 - Use `docker compose exec -it server npm --prefix apps/server run security:ops` on the VPS to redeem a recovery code or manually activate complete frontend lockdown.
+- Dashboard cookies are signed JWTs backed by durable server-side session records. The Security page lists active session IP addresses and devices and can revoke all sessions immediately. Login webhook buttons open that authenticated review page; they do not revoke sessions directly from Discord.
 - Configure `IPINFO_TOKEN` to enrich security alerts with VPN and proxy detection. If the lookup is not configured or unavailable, the alert reports `Unknown`.
 - The dashboard clears password fields on load, after login attempts, and whenever a sensitive export closes. Password inputs request no browser autofill. A password-manager extension can still override page hints, so enforce that policy in managed browsers as well.
 - The server trusts exactly one reverse-proxy hop because Docker exposes it through Caddy only. Do not expose the server container's port `3000` directly.

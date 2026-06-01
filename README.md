@@ -15,6 +15,8 @@ The checked-in defaults do not move money:
 - Domains can be grouped, color-labeled, archived, restored, and permanently deleted when they have no website history.
 - Dashboard login attempts are rate-limited. Two failed passwords within 15 minutes block the public IPv4 address or IPv6 `/64` network for a randomized 96-hour to five-week period, and security alerts can be delivered through the global `security_alert` Discord webhook route.
 - Network blocks include a one-time VPS recovery code in the owners security webhook. Three distinct blocked networks within 15 minutes automatically place only the frontend into lockdown while Helius ingestion, Supabase log ingestion, health checks, and the payout worker continue running.
+- Dashboard sessions are backed by durable records. The Security page lists active IP addresses and devices and can revoke every session immediately. New-login webhooks link directly to that authenticated review page.
+- The overview includes payout-readiness and operations-health panels. A manual reconciliation button requests the worker's normal guarded Privacy Cash pass without bypassing pauses, thresholds, leases, or idempotency checks.
 - Incoming Helius events and submitted payouts are deduplicated.
 - Submitted payout transactions are stored and recovered after worker restarts.
 - Suspicious, unpriced, unroutable, or high-impact tokens are quarantined instead of swapped.
@@ -231,6 +233,8 @@ docker compose logs -f worker
 docker compose restart worker
 docker compose exec worker npm run register:discord
 ```
+
+The worker reconciles hosted websites automatically according to `RECONCILE_INTERVAL_MS` and also polls durable manual reconciliation requests. The overview dashboard shows the worker heartbeat, last Helius event, last successful swap, Privacy Cash queue depth, review-required jobs, delayed withdrawal count, and every live-payout prerequisite.
 
 Review [`SECURITY.md`](./SECURITY.md) before enabling mainnet transfers.
 

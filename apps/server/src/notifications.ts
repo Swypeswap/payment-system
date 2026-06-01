@@ -76,7 +76,11 @@ export async function sendWebhook(
     },
     env.MASTER_ENCRYPTION_KEY
   );
-  const response = await fetch(webhookUrl, {
+  const deliveryUrl = new URL(webhookUrl);
+  if (Array.isArray(payload.components) && payload.components.length > 0) {
+    deliveryUrl.searchParams.set("with_components", "true");
+  }
+  const response = await fetch(deliveryUrl, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({

@@ -1,6 +1,6 @@
-const pages = ["overview", "websites", "teams", "wallets", "domains", "webhooks", "activity", "settings"];
+const pages = ["overview", "websites", "teams", "wallets", "domains", "webhooks", "activity", "security", "settings"];
 let state = null;
-let page = "overview";
+let page = location.hash === "#security" ? "security" : "overview";
 let walletMode = "active";
 let domainMode = "active";
 
@@ -106,7 +106,54 @@ function overview() {
         </div>
       </article>
       <article class="card"><h3>Latest payouts</h3>${activityTable(state.payouts, "payout")}</article>
+    </div>
+    <div class="grid two" style="margin-top:1rem">
+      ${payoutReadinessPanel()}
+      ${operationsHealthPanel()}
     </div>`;
+}
+
+function readinessLine(label, ready, detail = "") {
+  return `<div class="health-row"><span class="chip ${ready ? "good" : "bad"}">${ready ? "READY" : "CHECK"}</span><strong>${esc(label)}</strong>${detail ? `<small>${esc(detail)}</small>` : ""}</div>`;
+}
+
+function payoutReadinessPanel() {
+  const r = state.operations.readiness;
+  const latest = state.operations.health.latest_manual_reconciliation;
+  const waiting = latest && ["pending", "processing"].includes(latest.status);
+  return `<article class="card"><h3>Payout readiness</h3>
+    <div class="stack">
+      ${readinessLine("Ubuntu DRY_RUN disabled", r.dry_run_disabled)}
+      ${readinessLine("Solana mainnet cluster", r.mainnet_cluster)}
+      ${readinessLine("Emergency pause disabled", r.emergency_pause_disabled)}
+      ${readinessLine("Guarded SPL swaps enabled", r.swaps_enabled)}
+      ${readinessLine("Privacy Cash enabled", r.privacy_cash_enabled)}
+      ${readinessLine("Hosted websites", r.hosted_websites.ready, `${r.hosted_websites.count} hosted`)}
+      ${readinessLine("Owner wallets", r.owner_wallets.ready, `${r.owner_wallets.configured}/${r.owner_wallets.required} configured`)}
+      ${readinessLine("Manager wallets", r.manager_wallets.ready, `${r.manager_wallets.configured}/${r.manager_wallets.required} hosted teams configured`)}
+      ${readinessLine("Threshold status", r.threshold_status.ready, `${r.threshold_status.reached}/${r.threshold_status.hosted} hosted wallets currently at or above threshold`)}
+      <div class="health-row"><span class="chip ${r.pending_payout_legs ? "warn" : "good"}">${esc(r.pending_payout_legs)}</span><strong>Pending payout legs</strong></div>
+      <button class="ghost" data-request-reconciliation ${waiting ? "disabled" : ""}>${waiting ? "Guarded reconciliation queued" : "Run guarded Privacy Cash reconciliation"}</button>
+      <small>This asks the worker to run its normal guarded reconciliation immediately. Automatic checks continue on the configured interval.</small>
+    </div>
+  </article>`;
+}
+
+function operationsHealthPanel() {
+  const h = state.operations.health;
+  const worker = h.worker;
+  return `<article class="card"><h3>Operations health</h3>
+    <div class="metric-grid">
+      <div><strong>${worker?.online ? "Online" : "Offline"}</strong><small>Worker heartbeat</small><small>${worker ? date(worker.last_seen_at) : "No heartbeat yet"}</small></div>
+      <div><strong>${esc(h.privacy_cash_queue_depth)}</strong><small>Privacy Cash queue depth</small></div>
+      <div><strong>${esc(h.pending_payout_legs)}</strong><small>Pending payout legs</small></div>
+      <div><strong>${esc(h.delayed_withdrawals_awaiting_release)}</strong><small>Delayed withdrawals awaiting release</small></div>
+      <div><strong>${esc(h.failed_jobs)}</strong><small>Failed or review-required jobs</small></div>
+      <div><strong>${h.last_helius_event ? date(h.last_helius_event.created_at) : "-"}</strong><small>Last Helius event</small></div>
+      <div><strong>${h.last_successful_swap ? date(h.last_successful_swap.updated_at) : "-"}</strong><small>Last successful swap</small></div>
+      <div><strong>${h.latest_manual_reconciliation ? esc(h.latest_manual_reconciliation.status) : "-"}</strong><small>Latest manual reconciliation</small></div>
+    </div>
+  </article>`;
 }
 
 function websites() {
@@ -337,6 +384,18 @@ function activity() {
     ${state.auditLogs.map(item => `<tr><td>${date(item.created_at)}</td><td>${esc(item.actor_type)}: ${esc(item.actor_id)}</td><td>${esc(item.action)}</td><td>${esc(item.entity_type)} ${esc(short(item.entity_id))}</td></tr>`).join("")}</tbody></table></div></article></div>`;
 }
 
+function security() {
+  const sessions = state.operations.sessions;
+  return `<div class="grid two">
+    <article class="card full"><div class="wallet-toolbar"><div><h3>Active dashboard sessions</h3>
+      <small>Review every signed-in device. Revoking all sessions immediately signs everyone out, including this browser.</small></div>
+      <button class="danger-action" data-revoke-all-sessions>Revoke all sessions</button></div>
+      <div class="table-wrap" style="margin-top:0.8rem"><table><thead><tr><th>IP address</th><th>Network</th><th>Device</th><th>Created</th><th>Last seen</th><th>Expires</th></tr></thead>
+      <tbody>${sessions.map((session) => `<tr><td><code>${esc(session.ip_address)}</code></td><td><code>${esc(session.network_key)}</code></td><td>${esc(session.device)}</td><td>${date(session.created_at)}</td><td>${date(session.last_seen_at)}</td><td>${date(session.expires_at)}</td></tr>`).join("") || '<tr><td colspan="6"><small>No active sessions.</small></td></tr>'}</tbody></table></div>
+    </article>
+  </div>`;
+}
+
 function settings() {
   const s = state.settings;
   return `<article class="card"><h3>Global defaults and guardrails</h3><form id="settings-form" class="form-grid">
@@ -368,7 +427,7 @@ function render() {
   $("#system-status").textContent = state.settings.emergency_paused ? "PAUSED" :
     state.settings.live_payouts_enabled ? "LIVE" : "DRY RUN";
   $("#system-status").className = `status-pill ${state.settings.emergency_paused ? "bad" : state.settings.live_payouts_enabled ? "good" : "warn"}`;
-  $("#content").innerHTML = ({ overview, websites, teams, wallets, domains, webhooks, activity, settings }[page])();
+  $("#content").innerHTML = ({ overview, websites, teams, wallets, domains, webhooks, activity, security, settings }[page])();
   if (page === "wallets") syncWalletImportGroup();
   if (page === "domains") syncDomainImportGroup();
 }
@@ -609,7 +668,12 @@ document.addEventListener("submit", async (event) => {
 document.addEventListener("click", async (event) => {
   const button = event.target.closest("button");
   if (!button) return;
-  if (button.dataset.page) { page = button.dataset.page; render(); }
+  if (button.dataset.page) {
+    page = button.dataset.page;
+    if (page === "security") location.hash = "security";
+    else if (location.hash) history.replaceState(null, "", location.pathname);
+    render();
+  }
   if (button.id === "logout") { await api("/api/logout", { method: "POST" }); location.reload(); }
   if (button.dataset.archiveDomain && confirm("Archive this domain?")) mutate(`/api/domains/${button.dataset.archiveDomain}/archive`, "POST");
   if (button.dataset.restoreDomain && confirm("Restore this domain to the active list?")) mutate(`/api/domains/${button.dataset.restoreDomain}`, "PUT", { status: "pool" });
@@ -626,6 +690,17 @@ document.addEventListener("click", async (event) => {
   if (button.dataset.editWalletGroup) openWalletGroupDialog(button.dataset.editWalletGroup);
   if (button.dataset.exportPrivateKey) openPrivateKeyDialog(button.dataset.exportPrivateKey);
   if (button.dataset.walletMode) { walletMode = button.dataset.walletMode; render(); }
+  if (button.dataset.requestReconciliation !== undefined && confirm("Run the normal guarded Privacy Cash reconciliation now? Existing pauses, thresholds, locks, and idempotency checks remain enforced.")) {
+    mutate("/api/reconciliation-requests", "POST");
+  }
+  if (button.dataset.revokeAllSessions !== undefined && confirm("Revoke every dashboard session, including this browser?")) {
+    try {
+      await api("/api/sessions/revoke-all", { method: "POST" });
+      location.reload();
+    } catch (error) {
+      notice(error.message, "error");
+    }
+  }
   if (button.dataset.exportWalletCsv !== undefined) {
     try {
       await downloadAttachment("/api/wallets/export-csv", { status: $("#wallet-export-status").value });

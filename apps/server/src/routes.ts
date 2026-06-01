@@ -24,7 +24,14 @@ import {
   sendSupabaseSecurityAlerts,
   supabaseLogsFrom
 } from "./security.js";
-import { createSessionToken, dashboardCookie, isValidSession } from "./session.js";
+import {
+  createSessionToken,
+  dashboardCookie,
+  isValidSession,
+  listActiveSessions,
+  revokeAllSessions,
+  revokeSession
+} from "./session.js";
 
 const uuid = z.string().uuid();
 const optionalNumber = z.number().nonnegative().nullable().optional();
@@ -106,6 +113,120 @@ function heliusEventKey(payload: Record<string, unknown>, index: number): string
   return `helius:${createHash("sha256")
     .update(`${index}:${JSON.stringify(payload)}`)
     .digest("hex")}`;
+}
+
+async function countRows(query: PromiseLike<{ count: number | null; error: { message: string } | null }>) {
+  const result = await query;
+  if (result.error) throw new Error(result.error.message);
+  return result.count ?? 0;
+}
+
+async function firstRow<T>(query: PromiseLike<{ data: T[] | null; error: { message: string } | null }>) {
+  const result = await query;
+  if (result.error) throw new Error(result.error.message);
+  return result.data?.[0] ?? null;
+}
+
+async function loadOperationsDashboard(
+  settings: Record<string, unknown>,
+  websites: Array<Record<string, any>>,
+  owners: Array<Record<string, any>>
+) {
+  const now = new Date();
+  const nowIso = now.toISOString();
+  const [
+    workerHeartbeat,
+    lastHeliusEvent,
+    lastSuccessfulSwap,
+    latestSnapshots,
+    latestManualRequest,
+    openShields,
+    openWithdrawals,
+    delayedWithdrawals,
+    shieldReviews,
+    withdrawalReviews,
+    payoutReviews,
+    failedChainEvents,
+    failedSwaps,
+    sessions
+  ] = await Promise.all([
+    firstRow(db.from("worker_heartbeats").select("*").order("last_seen_at", { ascending: false }).limit(1)),
+    firstRow(db.from("chain_events").select("id,status,created_at,processed_at").eq("provider", "helius").order("created_at", { ascending: false }).limit(1)),
+    firstRow(db.from("swap_attempts").select("id,signature,updated_at").eq("status", "succeeded").order("updated_at", { ascending: false }).limit(1)),
+    db.from("wallet_balance_snapshots").select("website_id,estimated_sol_value_usd,created_at").order("created_at", { ascending: false }).limit(500),
+    firstRow(db.from("manual_reconciliation_requests").select("*").order("created_at", { ascending: false }).limit(1)),
+    countRows(db.from("privacy_cash_shield_jobs").select("id", { count: "exact", head: true }).in("status", ["pending", "processing"])),
+    countRows(db.from("privacy_cash_withdrawal_jobs").select("id", { count: "exact", head: true }).in("status", ["pending", "processing"])),
+    countRows(db.from("privacy_cash_withdrawal_jobs").select("id", { count: "exact", head: true }).eq("status", "pending").gt("scheduled_for", nowIso)),
+    countRows(db.from("privacy_cash_shield_jobs").select("id", { count: "exact", head: true }).eq("status", "review_required")),
+    countRows(db.from("privacy_cash_withdrawal_jobs").select("id", { count: "exact", head: true }).eq("status", "review_required")),
+    countRows(db.from("privacy_cash_payout_batches").select("id", { count: "exact", head: true }).eq("status", "review_required")),
+    countRows(db.from("chain_events").select("id", { count: "exact", head: true }).eq("status", "failed")),
+    countRows(db.from("swap_attempts").select("id", { count: "exact", head: true }).eq("status", "failed")),
+    listActiveSessions()
+  ]);
+  if (latestSnapshots.error) throw new Error(latestSnapshots.error.message);
+
+  const hostedWebsites = websites.filter((website) => website.active && website.hosted);
+  const activeOwners = owners.filter((owner) => owner.active);
+  const latestSnapshotByWebsite = new Map<string, Record<string, any>>();
+  for (const snapshot of latestSnapshots.data ?? []) {
+    if (!latestSnapshotByWebsite.has(snapshot.website_id)) {
+      latestSnapshotByWebsite.set(snapshot.website_id, snapshot);
+    }
+  }
+  const thresholdReadyCount = hostedWebsites.filter((website) => {
+    const snapshot = latestSnapshotByWebsite.get(website.id);
+    return snapshot &&
+      Number(snapshot.estimated_sol_value_usd ?? 0) >=
+      Number(website.threshold_usd ?? settings.global_threshold_usd);
+  }).length;
+  const heartbeatAgeMs = workerHeartbeat
+    ? now.getTime() - new Date(workerHeartbeat.last_seen_at).getTime()
+    : null;
+  const workerMetadata = workerHeartbeat?.metadata ?? {};
+
+  return {
+    readiness: {
+      dry_run_disabled: workerMetadata.dry_run === false,
+      mainnet_cluster: workerMetadata.solana_cluster === "mainnet-beta",
+      emergency_pause_disabled: settings.emergency_paused === false,
+      swaps_enabled: settings.swaps_enabled === true,
+      privacy_cash_enabled: settings.privacy_cash_enabled === true,
+      hosted_websites: { ready: hostedWebsites.length > 0, count: hostedWebsites.length },
+      owner_wallets: {
+        ready: activeOwners.length === 3 && activeOwners.every((owner) => owner.solana_wallet_address),
+        configured: activeOwners.filter((owner) => owner.solana_wallet_address).length,
+        required: 3
+      },
+      manager_wallets: {
+        ready: hostedWebsites.length > 0 && hostedWebsites.every((website) => website.teams?.manager_wallet_address),
+        configured: hostedWebsites.filter((website) => website.teams?.manager_wallet_address).length,
+        required: hostedWebsites.length
+      },
+      threshold_status: {
+        ready: thresholdReadyCount > 0,
+        reached: thresholdReadyCount,
+        hosted: hostedWebsites.length
+      },
+      pending_payout_legs: openWithdrawals
+    },
+    health: {
+      worker: workerHeartbeat ? {
+        ...workerHeartbeat,
+        online: heartbeatAgeMs !== null && heartbeatAgeMs < 90_000
+      } : null,
+      last_helius_event: lastHeliusEvent,
+      last_successful_swap: lastSuccessfulSwap,
+      privacy_cash_queue_depth: openShields + openWithdrawals,
+      open_shields: openShields,
+      pending_payout_legs: openWithdrawals,
+      delayed_withdrawals_awaiting_release: delayedWithdrawals,
+      failed_jobs: shieldReviews + withdrawalReviews + payoutReviews + failedChainEvents + failedSwaps,
+      latest_manual_reconciliation: latestManualRequest
+    },
+    sessions
+  };
 }
 
 async function requireDashboard(request: FastifyRequest, reply: FastifyReply) {
@@ -247,17 +368,22 @@ export async function registerRoutes(app: FastifyInstance) {
           : reply.code(401).send({ error: "Invalid password" });
       }
       await clearDashboardLoginFailures(networkKey);
-      const token = await createSessionToken();
+      const token = await createSessionToken({
+        ip: request.ip,
+        userAgent: request.headers["user-agent"]
+      });
       reply.setCookie(dashboardCookie.name, token, dashboardCookie.options);
       sendSecurityAlert(request, "Dashboard login succeeded", {
         event: "login_succeeded",
-        severity: "info"
+        severity: "info",
+        session_management: env.PUBLIC_BASE_URL ? `${env.PUBLIC_BASE_URL}/#security` : "Open the dashboard Security page"
       });
       return { ok: true };
     }
   );
 
-  app.post("/api/logout", async (_request, reply) => {
+  app.post("/api/logout", async (request, reply) => {
+    await revokeSession(request.cookies[dashboardCookie.name]);
     reply.clearCookie(dashboardCookie.name, { path: "/" });
     return { ok: true };
   });
@@ -354,16 +480,20 @@ export async function registerRoutes(app: FastifyInstance) {
         listRedactedRoutes()
       ]);
 
+      const settingsData = unwrap(settings);
+      const teamsData = unwrap(teams);
+      const ownersData = unwrap(owners);
+      const websitesData = unwrap(websites);
       return {
-        settings: unwrap(settings),
-        teams: unwrap(teams),
+        settings: settingsData,
+        teams: teamsData,
         managers: unwrap(managers),
-        owners: unwrap(owners),
+        owners: ownersData,
         wallets: unwrap(wallets),
         walletGroups: unwrap(walletGroups),
         domains: unwrap(domains),
         domainGroups: unwrap(domainGroups),
-        websites: unwrap(websites),
+        websites: websitesData,
         websiteRequests: unwrap(requests),
         deposits: unwrap(deposits),
         swaps: unwrap(swaps),
@@ -373,8 +503,32 @@ export async function registerRoutes(app: FastifyInstance) {
         rotationNotifications: unwrap(rotationNotifications),
         auditLogs: unwrap(auditLogs),
         walletHistory: unwrap(walletHistory),
-        notificationRoutes: routes
+        notificationRoutes: routes,
+        operations: await loadOperationsDashboard(settingsData, websitesData, ownersData)
       };
+    });
+
+    protectedApi.post("/api/sessions/revoke-all", async (request, reply) => {
+      await revokeAllSessions();
+      await audit("dashboard_sessions.revoked_all", "dashboard_session");
+      sendSecurityAlert(request, "All dashboard sessions revoked", {
+        event: "dashboard_sessions_revoked_all",
+        severity: "warning"
+      });
+      reply.clearCookie(dashboardCookie.name, { path: "/" });
+      return { ok: true };
+    });
+
+    protectedApi.post("/api/reconciliation-requests", async () => {
+      const request = unwrap(
+        await db
+          .from("manual_reconciliation_requests")
+          .insert({ requested_by: "shared-staff-account" })
+          .select("*")
+          .single()
+      );
+      await audit("privacy_cash.reconciliation_requested", "manual_reconciliation_request", request.id);
+      return request;
     });
 
     protectedApi.put("/api/settings", async (request) => {

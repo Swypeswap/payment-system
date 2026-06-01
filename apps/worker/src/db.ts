@@ -7,6 +7,7 @@ export const db = createClient(env.SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_KEY, 
     autoRefreshToken: false
   }
 });
+const startedAt = new Date().toISOString();
 
 export function unwrap<T>(result: { data: T; error: { message: string } | null }): NonNullable<T> {
   if (result.error) throw new Error(result.error.message);
@@ -29,4 +30,22 @@ export async function workerAudit(
     metadata
   });
   if (error) console.error("Could not write audit record:", error.message);
+}
+
+export async function reportWorkerHeartbeat() {
+  const { error } = await db
+    .from("worker_heartbeats")
+    .upsert({
+      worker_id: env.WORKER_ID,
+      started_at: startedAt,
+      last_seen_at: new Date().toISOString(),
+      metadata: {
+        solana_cluster: env.SOLANA_CLUSTER,
+        dry_run: env.DRY_RUN,
+        reconcile_interval_ms: env.RECONCILE_INTERVAL_MS,
+        event_interval_ms: env.EVENT_INTERVAL_MS,
+        privacy_cash_interval_ms: env.PRIVACY_CASH_INTERVAL_MS
+      }
+    }, { onConflict: "worker_id" });
+  if (error) throw new Error(error.message);
 }

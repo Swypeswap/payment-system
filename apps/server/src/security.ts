@@ -61,7 +61,7 @@ function isPrivateIp(ip: string): boolean {
   );
 }
 
-function describeDevice(userAgent = ""): string {
+export function describeDevice(userAgent = ""): string {
   const os = /iPhone|iPad|iPod/i.test(userAgent)
     ? "iOS"
     : /Android/i.test(userAgent)
@@ -277,8 +277,22 @@ export async function sendDashboardSecurityAlert(
 ): Promise<void> {
   const context = await contextFor(request.ip, request.headers["user-agent"]);
   auditSecurityEvent(`security.${String(metadata.event ?? "dashboard_alert")}`, context, metadata);
+  const sessionManagementUrl = metadata.event === "login_succeeded" && env.PUBLIC_BASE_URL
+    ? `${env.PUBLIC_BASE_URL}/#security`
+    : null;
   await sendWebhook("security_alert", {
     content: "@everyone",
+    ...(sessionManagementUrl ? {
+      components: [{
+        type: 1,
+        components: [{
+          type: 2,
+          style: 5,
+          label: "Review and revoke sessions",
+          url: sessionManagementUrl
+        }]
+      }]
+    } : {}),
     embeds: [{
       title,
       color: 0xff315f,
