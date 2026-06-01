@@ -148,6 +148,7 @@ export async function sendDashboardSecurityAlert(
   const context = await contextFor(request.ip, request.headers["user-agent"]);
   auditSecurityEvent(`security.${String(metadata.event ?? "dashboard_alert")}`, context, metadata);
   await sendWebhook("security_alert", {
+    content: "@everyone",
     embeds: [{
       title,
       color: 0xff315f,
@@ -163,7 +164,7 @@ export async function sendDashboardSecurityAlert(
         }))
       ]
     }]
-  });
+  }, { mentionEveryone: true });
 }
 
 function findString(value: unknown, keys: Set<string>): string | undefined {
@@ -212,6 +213,7 @@ export async function sendSupabaseSecurityAlerts(logs: unknown[]): Promise<numbe
     const context = await contextFor(signal.ip ?? "Unavailable in drained event", signal.userAgent);
     auditSecurityEvent("security.supabase_signal", context, { rule: signal.rule, source: signal.source });
     await sendWebhook("security_alert", {
+      content: "@everyone",
       embeds: [{
         title: "Supabase security signal",
         color: 0xff315f,
@@ -225,7 +227,42 @@ export async function sendSupabaseSecurityAlerts(logs: unknown[]): Promise<numbe
           { name: "Privacy signals", value: truncate(context.privacySignals) }
         ]
       }]
-    });
+    }, { mentionEveryone: true });
   }
   return signals.length;
+}
+
+function normalizeIp(ip: string) {
+  if (ip.startsWith("::ffff:") && isIP(ip.slice(7)) === 4) {
+    return ip.slice(7);
+  }
+
+  return ip.toLowerCase();
+}
+
+function ipv6Prefix64(ip: string) {
+  const [head = "", tail = ""] = ip.split("::");
+  const headParts = head ? head.split(":") : [];
+  const tailParts = tail ? tail.split(":") : [];
+  const missingParts = Math.max(0, 8 - headParts.length - tailParts.length);
+
+  return [...headParts, ...Array(missingParts).fill("0"), ...tailParts]
+    .slice(0, 4)
+    .map((part) => part.padStart(4, "0"))
+    .join(":");
+}
+
+export function dashboardNetworkKey(ip: string) {
+  const normalizedIp = normalizeIp(ip);
+  const ipVersion = isIP(normalizedIp);
+
+  if (ipVersion === 4) {
+    return `ipv4:${normalizedIp}`;
+  }
+
+  if (ipVersion === 6) {
+    return `ipv6-64:${ipv6Prefix64(normalizedIp)}`;
+  }
+
+  return `unknown:${normalizedIp}`;
 }

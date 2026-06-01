@@ -15,17 +15,18 @@ import { audit } from "./audit.js";
 import { db, unwrap } from "./db.js";
 import { env } from "./env.js";
 import { encryptWebhookUrl, listRedactedRoutes, sendWebhook } from "./notifications.js";
-import { sendDashboardSecurityAlert, sendSupabaseSecurityAlerts, supabaseLogsFrom } from "./security.js";
+import { dashboardNetworkKey, sendDashboardSecurityAlert, sendSupabaseSecurityAlerts, supabaseLogsFrom } from "./security.js";
 import { createSessionToken, dashboardCookie, isValidSession } from "./session.js";
 
 const uuid = z.string().uuid();
 const optionalNumber = z.number().nonnegative().nullable().optional();
 const percent = z.number().min(0).max(100);
 const colorLabel = z.string().regex(/^#[0-9a-fA-F]{6}$/);
-const loginFailures = new Map<string, { attempts: number; firstAttemptAt: number; blockedUntil: number }>();
-const LOGIN_FAILURE_WINDOW_MS = 15 * 60 * 1000;
-const LOGIN_BLOCK_MS = 15 * 60 * 1000;
-const LOGIN_MAX_FAILURES = 5;
+interface DashboardNetworkBlock {
+  network_key: string;
+  failed_attempts: number;
+  blocked_until: string | null;
+}
 
 function csvCell(value: unknown): string {
   return `"${String(value ?? "").replaceAll('"', '""')}"`;
@@ -49,19 +50,30 @@ function sendSecurityAlert(request: FastifyRequest, title: string, metadata: Rec
   });
 }
 
-function failedLoginState(ip: string) {
-  const now = Date.now();
-  const current = loginFailures.get(ip);
-  if (!current || now - current.firstAttemptAt > LOGIN_FAILURE_WINDOW_MS) {
-    const reset = { attempts: 1, firstAttemptAt: now, blockedUntil: 0 };
-    loginFailures.set(ip, reset);
-    return reset;
-  }
-  current.attempts += 1;
-  if (current.attempts >= LOGIN_MAX_FAILURES) {
-    current.blockedUntil = now + LOGIN_BLOCK_MS;
-  }
-  return current;
+async function getDashboardNetworkBlock(networkKey: string) {
+  const result = await db
+    .from("dashboard_network_blocks")
+    .select("network_key,failed_attempts,blocked_until")
+    .eq("network_key", networkKey)
+    .maybeSingle();
+  if (result.error) throw new Error(result.error.message);
+  return result.data as DashboardNetworkBlock | null;
+}
+
+async function recordDashboardLoginFailure(networkKey: string, ip: string) {
+  return unwrap(
+    await db.rpc("record_dashboard_login_failure", {
+      requested_network_key: networkKey,
+      requested_ip: ip
+    })
+  ) as DashboardNetworkBlock;
+}
+
+async function clearDashboardLoginFailures(networkKey: string) {
+  const result = await db.rpc("clear_dashboard_login_failures", {
+    requested_network_key: networkKey
+  });
+  if (result.error) throw new Error(result.error.message);
 }
 
 function getHeliusSignature(payload: Record<string, unknown>): string | undefined {
@@ -186,28 +198,34 @@ export async function registerRoutes(app: FastifyInstance) {
       }
     },
     async (request, reply) => {
-      const now = Date.now();
-      const existing = loginFailures.get(request.ip);
-      if (existing?.blockedUntil && existing.blockedUntil > now) {
+      const networkKey = dashboardNetworkKey(request.ip);
+      const existing = await getDashboardNetworkBlock(networkKey);
+      if (existing?.blocked_until && new Date(existing.blocked_until).getTime() > Date.now()) {
         sendSecurityAlert(request, "Blocked dashboard login attempt", {
           event: "login_blocked",
           severity: "high",
-          failed_attempts: existing.attempts
+          network: networkKey,
+          failed_attempts: existing.failed_attempts,
+          blocked_until: existing.blocked_until
         });
         return reply.code(429).send({ error: "Too many failed login attempts. Try again later." });
       }
 
       const { password } = z.object({ password: z.string().min(1) }).parse(request.body);
       if (!(await bcrypt.compare(password, env.DASHBOARD_PASSWORD_HASH))) {
-        const failures = failedLoginState(request.ip);
-        sendSecurityAlert(request, failures.blockedUntil ? "Dashboard login blocked after repeated failures" : "Dashboard login failed", {
-          event: failures.blockedUntil ? "login_blocked" : "login_failed",
-          severity: failures.attempts >= 3 ? "high" : "warning",
-          failed_attempts: failures.attempts
+        const failures = await recordDashboardLoginFailure(networkKey, request.ip);
+        sendSecurityAlert(request, failures.blocked_until ? "Dashboard login blocked after repeated failures" : "Dashboard login failed", {
+          event: failures.blocked_until ? "login_blocked" : "login_failed",
+          severity: failures.blocked_until ? "high" : "warning",
+          network: networkKey,
+          failed_attempts: failures.failed_attempts,
+          blocked_until: failures.blocked_until ?? "Not blocked"
         });
-        return reply.code(401).send({ error: "Invalid password" });
+        return failures.blocked_until
+          ? reply.code(429).send({ error: "Too many failed login attempts. Try again later." })
+          : reply.code(401).send({ error: "Invalid password" });
       }
-      loginFailures.delete(request.ip);
+      await clearDashboardLoginFailures(networkKey);
       const token = await createSessionToken();
       reply.setCookie(dashboardCookie.name, token, dashboardCookie.options);
       sendSecurityAlert(request, "Dashboard login succeeded", {
