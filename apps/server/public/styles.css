@@ -14,6 +14,7 @@
 }
 
 * { box-sizing: border-box; }
+[hidden] { display: none !important; }
 body { margin: 0; background: radial-gradient(circle at 80% 0%, #123a31 0, var(--bg) 34rem); color: var(--text); }
 button, input, select, textarea { font: inherit; }
 button { cursor: pointer; border: 0; border-radius: 0.7rem; background: var(--accent); color: #062019; font-weight: 750; padding: 0.72rem 0.95rem; }
@@ -22,6 +23,7 @@ button:disabled { cursor: not-allowed; opacity: 0.5; }
 button:disabled:hover { filter: none; }
 button.ghost { background: transparent; border: 1px solid var(--line); color: var(--text); }
 button.danger { color: var(--danger); }
+button.danger-action { background: var(--danger); color: #27080d; }
 button.small { padding: 0.42rem 0.62rem; font-size: 0.78rem; }
 input, select, textarea { width: 100%; background: #071412; border: 1px solid var(--line); color: var(--text); border-radius: 0.6rem; padding: 0.7rem; }
 textarea { min-height: 6rem; resize: vertical; }
@@ -62,6 +64,18 @@ th, td { padding: 0.65rem 0.5rem; text-align: left; vertical-align: top; border-
 th { color: var(--muted); font-weight: 650; }
 td code { color: var(--accent); font-size: 0.72rem; }
 .actions { display: flex; flex-wrap: wrap; gap: 0.4rem; }
+.wallet-toolbar, .wallet-group-heading, .wallet-group-summary { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; }
+.wallet-toolbar { flex-wrap: wrap; }
+.wallet-export select { min-width: 13rem; }
+.wallet-group { border-left: 0.28rem solid var(--wallet-group-color); }
+.wallet-group-heading { margin-bottom: 0.65rem; }
+.wallet-group-heading > div, .wallet-group-summary { display: flex; align-items: center; gap: 0.55rem; }
+.wallet-group-summary { justify-content: flex-start; }
+.wallet-group-summary button { margin-left: auto; }
+.color-dot { display: inline-block; width: 0.72rem; height: 0.72rem; flex: 0 0 auto; border-radius: 50%; background: var(--label-color, var(--wallet-group-color, var(--accent))); box-shadow: 0 0 0 0.2rem rgba(255, 255, 255, 0.04); }
+.segmented { display: inline-flex; gap: 0.25rem; padding: 0.24rem; border: 1px solid var(--line); border-radius: 0.8rem; background: #071412; }
+.segmented button { background: transparent; color: var(--muted); padding: 0.5rem 0.75rem; }
+.segmented button.active { background: var(--panel-2); color: var(--accent); }
 .notice { border: 1px solid var(--line); border-radius: 0.7rem; padding: 0.75rem; margin-bottom: 1rem; background: var(--panel); }
 .notice.error { color: var(--danger); border-color: rgba(255, 123, 139, 0.35); }
 .notice.success { color: var(--accent); }

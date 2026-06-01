@@ -13,6 +13,7 @@ This platform is custodial software. Imported revenue-wallet private keys can au
 - Treat every Privacy Cash or relayer outage as a manual-review event. Never retry an interrupted withdrawal without checking the recipient transaction first.
 - Owner and manager payout addresses are public addresses only. The Discord bot must never request seed phrases or private keys.
 - Owner wallet updates are authorized by the linked immutable Discord user ID. Usernames are display metadata only.
+- Revenue-wallet CSV exports contain metadata only. Private-key exports are separate, per-wallet, authenticated, password-confirmed, rate-limited, audited, and returned with `no-store` headers.
 
 ## Dependency Audit
 

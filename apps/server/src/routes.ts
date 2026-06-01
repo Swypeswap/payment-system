@@ -3,6 +3,7 @@ import bcrypt from "bcryptjs";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import {
   NOTIFICATION_KINDS,
+  decryptSecret,
   encryptSecret,
   parseSecretKey,
   parseDomain,
@@ -19,6 +20,16 @@ import { createSessionToken, dashboardCookie, isValidSession } from "./session.j
 const uuid = z.string().uuid();
 const optionalNumber = z.number().nonnegative().nullable().optional();
 const percent = z.number().min(0).max(100);
+const colorLabel = z.string().regex(/^#[0-9a-fA-F]{6}$/);
+
+function csvCell(value: unknown): string {
+  return `"${String(value ?? "").replaceAll('"', '""')}"`;
+}
+
+function downloadFilename(label: string): string {
+  const normalized = label.replace(/[^a-z0-9_-]+/gi, "-").replace(/^-+|-+$/g, "");
+  return normalized || "revenue-wallet";
+}
 
 function getHeliusSignature(payload: Record<string, unknown>): string | undefined {
   if (typeof payload.signature === "string") {
@@ -176,6 +187,7 @@ export async function registerRoutes(app: FastifyInstance) {
         managers,
         owners,
         wallets,
+        walletGroups,
         domains,
         websites,
         requests,
@@ -196,7 +208,11 @@ export async function registerRoutes(app: FastifyInstance) {
           .order("name"),
         db.from("managers").select("*").order("display_name"),
         db.from("owner_profiles").select("*").order("display_name"),
-        db.from("revenue_wallets").select("id,label,address,active,created_at,updated_at").order("label"),
+        db
+          .from("revenue_wallets")
+          .select("id,label,address,active,wallet_group_id,color_label,created_at,updated_at,wallet_groups(id,name,color_label)")
+          .order("label"),
+        db.from("wallet_groups").select("*").order("name"),
         db.from("domains").select("*").order("domain"),
         db
           .from("websites")
@@ -220,6 +236,7 @@ export async function registerRoutes(app: FastifyInstance) {
         managers: unwrap(managers),
         owners: unwrap(owners),
         wallets: unwrap(wallets),
+        walletGroups: unwrap(walletGroups),
         domains: unwrap(domains),
         websites: unwrap(websites),
         websiteRequests: unwrap(requests),
@@ -502,29 +519,197 @@ export async function registerRoutes(app: FastifyInstance) {
       return { ok: true };
     });
 
-    protectedApi.post("/api/wallets/import", async (request) => {
-      const { label, private_key } = z
-        .object({ label: z.string().trim().min(1), private_key: z.string().min(1) })
+    protectedApi.post("/api/wallet-groups", async (request) => {
+      const values = z
+        .object({
+          name: z.string().trim().min(1),
+          color_label: colorLabel
+        })
         .parse(request.body);
-      const keypair = parseSecretKey(private_key);
-      const encrypted = encryptSecret(private_key.trim(), env.MASTER_ENCRYPTION_KEY);
+      const data = unwrap(
+        await db.from("wallet_groups").insert(values).select("*").single()
+      );
+      await audit("wallet_group.created", "wallet_group", data.id, values);
+      return data;
+    });
+
+    protectedApi.put("/api/wallet-groups/:id", async (request) => {
+      const { id } = z.object({ id: uuid }).parse(request.params);
+      const values = z
+        .object({
+          name: z.string().trim().min(1),
+          color_label: colorLabel
+        })
+        .parse(request.body);
+      const data = unwrap(
+        await db.from("wallet_groups").update(values).eq("id", id).select("*").single()
+      );
+      await audit("wallet_group.updated", "wallet_group", id, values);
+      return data;
+    });
+
+    protectedApi.post("/api/wallets/export-csv", async (request, reply) => {
+      const { status } = z
+        .object({ status: z.enum(["active", "archived", "both"]) })
+        .parse(request.body);
+      const wallets = unwrap(
+        await db
+          .from("revenue_wallets")
+          .select("label,address,active,color_label,created_at,updated_at,wallet_groups(name,color_label)")
+          .order("label")
+      ) as unknown as Array<{
+        label: string;
+        address: string;
+        active: boolean;
+        color_label: string;
+        created_at: string;
+        updated_at: string;
+        wallet_groups: { name: string; color_label: string } | null;
+      }>;
+      const filtered = wallets.filter((wallet) =>
+        status === "both" || wallet.active === (status === "active")
+      );
+      const rows = [
+        ["Label", "Address", "Status", "Group", "Group color", "Wallet color", "Created", "Updated"],
+        ...filtered.map((wallet) => [
+          wallet.label,
+          wallet.address,
+          wallet.active ? "Active" : "Archived",
+          wallet.wallet_groups?.name ?? "Ungrouped",
+          wallet.wallet_groups?.color_label ?? "",
+          wallet.color_label,
+          wallet.created_at,
+          wallet.updated_at
+        ])
+      ];
+      const csv = `${rows.map((row) => row.map(csvCell).join(",")).join("\r\n")}\r\n`;
+      await audit("revenue_wallet.csv_exported", "revenue_wallet", undefined, {
+        status,
+        count: filtered.length
+      });
+      return reply
+        .header("cache-control", "no-store, max-age=0")
+        .header("pragma", "no-cache")
+        .header("content-disposition", `attachment; filename="revenue-wallets-${status}.csv"`)
+        .type("text/csv; charset=utf-8")
+        .send(csv);
+    });
+
+    protectedApi.post(
+      "/api/wallets/:id/export-private-key",
+      { config: { rateLimit: { max: 5, timeWindow: "1 minute" } } },
+      async (request, reply) => {
+        const { id } = z.object({ id: uuid }).parse(request.params);
+        const { password } = z.object({ password: z.string().min(1) }).parse(request.body);
+        const passwordMatches = await bcrypt.compare(password, env.DASHBOARD_PASSWORD_HASH);
+        if (!passwordMatches) {
+          throw new Error("Invalid dashboard password");
+        }
+
+        const wallet = unwrap(
+          await db
+            .from("revenue_wallets")
+            .select("label,address,encrypted_private_key,encryption_nonce,encryption_auth_tag,encryption_key_version")
+            .eq("id", id)
+            .single()
+        );
+        const privateKey = decryptSecret(
+          {
+            ciphertext: wallet.encrypted_private_key,
+            nonce: wallet.encryption_nonce,
+            authTag: wallet.encryption_auth_tag,
+            keyVersion: wallet.encryption_key_version
+          },
+          env.MASTER_ENCRYPTION_KEY
+        );
+        await audit("revenue_wallet.private_key_exported", "revenue_wallet", id, {
+          address: wallet.address
+        });
+        return reply
+          .header("cache-control", "no-store, max-age=0")
+          .header("pragma", "no-cache")
+          .header("x-content-type-options", "nosniff")
+          .header("content-disposition", `attachment; filename="${downloadFilename(wallet.label)}-private-key.txt"`)
+          .type("text/plain; charset=utf-8")
+          .send(privateKey);
+      }
+    );
+
+    protectedApi.post("/api/wallets/import", async (request) => {
+      const values = z
+        .object({
+          label: z.string().trim().min(1),
+          private_key: z.string().min(1),
+          wallet_group_id: uuid.nullable().optional(),
+          new_group_name: z.string().trim().min(1).optional(),
+          new_group_color_label: colorLabel.optional(),
+          color_label: colorLabel
+        })
+        .parse(request.body);
+      if (values.wallet_group_id && values.new_group_name) {
+        throw new Error("Choose an existing wallet group or create a new group, not both");
+      }
+      const keypair = parseSecretKey(values.private_key);
+      const address = keypair.publicKey.toBase58();
+      const duplicate = await db.from("revenue_wallets").select("id").eq("address", address).maybeSingle();
+      if (duplicate.error) throw new Error(duplicate.error.message);
+      if (duplicate.data) throw new Error("Revenue wallet is already imported");
+
+      const encrypted = encryptSecret(values.private_key.trim(), env.MASTER_ENCRYPTION_KEY);
+      let walletGroupId = values.wallet_group_id ?? null;
+      if (values.new_group_name) {
+        const group = unwrap(
+          await db
+            .from("wallet_groups")
+            .insert({
+              name: values.new_group_name,
+              color_label: values.new_group_color_label ?? "#64f5b5"
+            })
+            .select("*")
+            .single()
+        );
+        walletGroupId = group.id;
+        await audit("wallet_group.created", "wallet_group", group.id, {
+          name: group.name,
+          color_label: group.color_label
+        });
+      }
       const data = unwrap(
         await db
           .from("revenue_wallets")
           .insert({
-            label,
-            address: keypair.publicKey.toBase58(),
+            label: values.label,
+            address,
+            wallet_group_id: walletGroupId,
+            color_label: values.color_label,
             encrypted_private_key: encrypted.ciphertext,
             encryption_nonce: encrypted.nonce,
             encryption_auth_tag: encrypted.authTag,
             encryption_key_version: encrypted.keyVersion
           })
-          .select("id,label,address,active,created_at")
+          .select("id,label,address,active,wallet_group_id,color_label,created_at")
           .single()
       );
       await audit("revenue_wallet.imported", "revenue_wallet", data.id, {
         address: data.address
       });
+      return data;
+    });
+
+    protectedApi.put("/api/wallets/:id", async (request) => {
+      const { id } = z.object({ id: uuid }).parse(request.params);
+      const values = z
+        .object({
+          label: z.string().trim().min(1).optional(),
+          wallet_group_id: uuid.nullable().optional(),
+          color_label: colorLabel.optional(),
+          active: z.boolean().optional()
+        })
+        .parse(request.body);
+      const data = unwrap(
+        await db.from("revenue_wallets").update(values).eq("id", id).select("id,label,address,active,wallet_group_id,color_label,updated_at").single()
+      );
+      await audit("revenue_wallet.updated", "revenue_wallet", id, values);
       return data;
     });
 

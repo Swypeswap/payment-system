@@ -58,5 +58,51 @@
         </div>
       </form>
     </dialog>
+
+    <dialog id="wallet-edit-dialog">
+      <form id="wallet-edit-form" class="modal-card">
+        <p class="eyebrow">WALLET ORGANIZATION</p>
+        <h2>Edit wallet</h2>
+        <p>Update the display label, group, and color label.</p>
+        <input type="hidden" name="wallet_id" />
+        <label>Label<input name="label" required /></label>
+        <label>Group<select name="wallet_group_id"></select></label>
+        <label>Wallet color<input name="color_label" type="color" required /></label>
+        <div class="modal-actions">
+          <button type="button" class="ghost" id="wallet-edit-cancel">Cancel</button>
+          <button type="submit">Save wallet</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="wallet-group-dialog">
+      <form id="wallet-group-form" class="modal-card">
+        <p class="eyebrow">WALLET ORGANIZATION</p>
+        <h2>Edit group</h2>
+        <p>Change the name and visual label for this wallet group.</p>
+        <input type="hidden" name="wallet_group_id" />
+        <label>Group name<input name="name" required /></label>
+        <label>Group color<input name="color_label" type="color" required /></label>
+        <div class="modal-actions">
+          <button type="button" class="ghost" id="wallet-group-cancel">Cancel</button>
+          <button type="submit">Save group</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="wallet-private-key-dialog">
+      <form id="wallet-private-key-form" class="modal-card">
+        <p class="eyebrow">SENSITIVE EXPORT</p>
+        <h2>Export private key</h2>
+        <p>This downloads the decrypted private key for <strong id="wallet-private-key-label"></strong>. Store it securely and remove unnecessary copies.</p>
+        <input type="hidden" name="wallet_id" />
+        <label>Type the wallet label to confirm<input name="confirm_label" autocomplete="off" required /></label>
+        <label>Confirm dashboard password<input name="password" type="password" autocomplete="current-password" required /></label>
+        <div class="modal-actions">
+          <button type="button" class="ghost" id="wallet-private-key-cancel">Cancel</button>
+          <button type="submit" class="danger-action">Export private key</button>
+        </div>
+      </form>
+    </dialog>
   </body>
 </html>

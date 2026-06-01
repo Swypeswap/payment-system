@@ -11,6 +11,7 @@ The checked-in defaults do not move money:
 - SPL swaps and live payouts start disabled.
 - Revenue-wallet private keys are encrypted with AES-256-GCM before they enter Supabase.
 - The encryption master key stays in the Ubuntu `.env` file and must never be stored in Supabase.
+- Revenue wallets can be grouped and color-labeled. CSV exports contain metadata only; per-wallet private-key downloads are password-confirmed, explicit audited actions.
 - Incoming Helius events and submitted payouts are deduplicated.
 - Submitted payout transactions are stored and recovered after worker restarts.
 - Suspicious, unpriced, unroutable, or high-impact tokens are quarantined instead of swapped.

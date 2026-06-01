@@ -1,6 +1,7 @@
 const pages = ["overview", "websites", "teams", "wallets", "domains", "webhooks", "activity", "settings"];
 let state = null;
 let page = "overview";
+let walletMode = "active";
 
 const $ = (selector) => document.querySelector(selector);
 const esc = (value = "") => String(value).replace(/[&<>"']/g, (char) => ({
@@ -49,6 +50,18 @@ function renderNav() {
 function option(items, value, label, placeholder = "Select") {
   return `<option value="">${placeholder}</option>${items.map((item) =>
     `<option value="${esc(item[value])}">${esc(item[label])}</option>`
+  ).join("")}`;
+}
+
+function validColor(value, fallback = "#64f5b5") {
+  return /^#[0-9a-fA-F]{6}$/.test(value || "") ? value : fallback;
+}
+
+const walletCount = (count) => `${count} wallet${count === 1 ? "" : "s"}`;
+
+function walletGroupOptions(selected = "") {
+  return `<option value="" ${selected ? "" : "selected"}>Ungrouped</option>${state.walletGroups.map((group) =>
+    `<option value="${esc(group.id)}" ${group.id === selected ? "selected" : ""}>${esc(group.name)}</option>`
   ).join("")}`;
 }
 
@@ -136,12 +149,78 @@ function teams() {
 }
 
 function wallets() {
+  const shownWallets = state.wallets.filter((wallet) => wallet.active === (walletMode === "active"));
+  const groups = [
+    ...state.walletGroups.map((group) => ({
+      ...group,
+      wallets: shownWallets.filter((wallet) => wallet.wallet_group_id === group.id)
+    })),
+    {
+      id: "",
+      name: "Ungrouped",
+      color_label: "#8da8a2",
+      wallets: shownWallets.filter((wallet) => !wallet.wallet_group_id)
+    }
+  ].filter((group) => group.wallets.length);
+  const rowsFor = (group) => group.wallets.map((wallet) => `
+    <tr>
+      <td><span class="color-dot" style="--label-color:${esc(validColor(wallet.color_label, group.color_label))}"></span><strong>${esc(wallet.label)}</strong></td>
+      <td><code>${esc(wallet.address)}</code></td>
+      <td>${wallet.active ? '<span class="chip good">Active</span>' : '<span class="chip bad">Archived</span>'}</td>
+      <td><div class="actions">
+        <button class="small ghost" data-edit-wallet="${wallet.id}">Edit</button>
+        <button class="small ghost" data-export-private-key="${wallet.id}">Export private key</button>
+        ${wallet.active
+          ? `<button class="small ghost danger" data-archive-wallet="${wallet.id}">Archive</button>`
+          : `<button class="small ghost" data-restore-wallet="${wallet.id}">Restore</button>`}
+      </div></td>
+    </tr>`).join("");
+  const groupCards = groups.map((group) => `
+    <article class="card wallet-group" style="--wallet-group-color:${esc(validColor(group.color_label, "#8da8a2"))}">
+      <div class="wallet-group-heading">
+        <div><span class="color-dot"></span><strong>${esc(group.name)}</strong><small>${walletCount(group.wallets.length)}</small></div>
+        ${group.id ? `<button class="small ghost" data-edit-wallet-group="${group.id}">Edit group</button>` : ""}
+      </div>
+      <div class="table-wrap"><table><thead><tr><th>Label</th><th>Address</th><th>Status</th><th>Actions</th></tr></thead>
+      <tbody>${rowsFor(group)}</tbody></table></div>
+    </article>`).join("");
   return `<div class="grid two">
-    <article class="card"><h3>Import revenue wallet</h3><p><small>The private key is encrypted by the server immediately and is never returned to the browser.</small></p>
-      <form id="wallet-form" class="stack"><label>Label<input name="label" required /></label>
-      <label>Private key<textarea name="private_key" required placeholder="Base58, base64, or JSON byte array"></textarea></label><button>Encrypt and import</button></form></article>
-    <article class="card"><h3>Revenue wallets</h3><div class="table-wrap"><table><thead><tr><th>Label</th><th>Address</th><th>Status</th><th>Action</th></tr></thead>
-      <tbody>${state.wallets.map((item) => `<tr><td>${esc(item.label)}</td><td><code>${esc(item.address)}</code></td><td>${item.active ? "Active" : "Archived"}</td><td>${item.active ? `<button class="small ghost danger" data-archive-wallet="${item.id}">Archive</button>` : ""}</td></tr>`).join("")}</tbody></table></div></article></div>`;
+    <article class="card"><h3>Import revenue wallet</h3><p><small>The private key is encrypted immediately. Group and color labels help separate wallet batches without exposing secrets.</small></p>
+      <form id="wallet-form" class="stack">
+        <label>Label<input name="label" required /></label>
+        <label>Wallet color<input name="color_label" type="color" value="#64f5b5" required /></label>
+        <label>Group<select name="wallet_group_id" id="wallet-import-group">${walletGroupOptions()}<option value="__new__">+ Create new group</option></select></label>
+        <div class="form-grid" id="wallet-new-group-fields" hidden>
+          <label>New group name<input name="new_group_name" /></label>
+          <label>New group color<input name="new_group_color_label" type="color" value="#64f5b5" /></label>
+        </div>
+        <label>Private key<textarea name="private_key" required placeholder="Base58, base64, or JSON byte array"></textarea></label>
+        <button>Encrypt and import</button>
+      </form>
+    </article>
+    <article class="card"><h3>Wallet organization</h3><p><small>Colors can be adjusted per group and per wallet after import.</small></p>
+      <div class="stack">
+        ${state.walletGroups.map((group) => `<div class="wallet-group-summary"><span class="color-dot" style="--label-color:${esc(validColor(group.color_label))}"></span><strong>${esc(group.name)}</strong><small>${walletCount(state.wallets.filter((wallet) => wallet.wallet_group_id === group.id).length)}</small><button class="small ghost" data-edit-wallet-group="${group.id}">Edit</button></div>`).join("") || "<small>No groups yet. Create one while importing a wallet.</small>"}
+      </div>
+    </article>
+    <article class="card full">
+      <div class="wallet-toolbar">
+        <div class="segmented">
+          <button class="${walletMode === "active" ? "active" : ""}" data-wallet-mode="active">Active (${state.wallets.filter((wallet) => wallet.active).length})</button>
+          <button class="${walletMode === "archived" ? "active" : ""}" data-wallet-mode="archived">Archived (${state.wallets.filter((wallet) => !wallet.active).length})</button>
+        </div>
+        <div class="actions wallet-export">
+          <select id="wallet-export-status" aria-label="Wallet CSV export status">
+            <option value="active">Active wallets</option>
+            <option value="archived">Archived wallets</option>
+            <option value="both">Active and archived wallets</option>
+          </select>
+          <button class="ghost" data-export-wallet-csv>Export CSV</button>
+        </div>
+      </div>
+    </article>
+    <div class="stack full">${groupCards || `<article class="card"><small>No ${walletMode} wallets.</small></article>`}</div>
+  </div>`;
 }
 
 function domains() {
@@ -212,6 +291,7 @@ function render() {
     state.settings.live_payouts_enabled ? "LIVE" : "DRY RUN";
   $("#system-status").className = `status-pill ${state.settings.emergency_paused ? "bad" : state.settings.live_payouts_enabled ? "good" : "warn"}`;
   $("#content").innerHTML = ({ overview, websites, teams, wallets, domains, webhooks, activity, settings }[page])();
+  if (page === "wallets") syncWalletImportGroup();
 }
 
 async function load() {
@@ -229,6 +309,70 @@ function data(form) {
 }
 function optionalNumeric(value) { return value === "" ? null : Number(value); }
 function splitIds(value) { return value.split(",").map(v => v.trim()).filter(Boolean); }
+
+function syncWalletImportGroup() {
+  const select = $("#wallet-import-group");
+  const fields = $("#wallet-new-group-fields");
+  if (!select || !fields) return;
+  const creating = select.value === "__new__";
+  fields.hidden = !creating;
+  fields.querySelector("[name=new_group_name]").required = creating;
+}
+
+function openWalletEditDialog(walletId) {
+  const wallet = state.wallets.find((item) => item.id === walletId);
+  const dialog = $("#wallet-edit-dialog");
+  dialog.querySelector("[name=wallet_id]").value = wallet.id;
+  dialog.querySelector("[name=label]").value = wallet.label;
+  dialog.querySelector("[name=wallet_group_id]").innerHTML = walletGroupOptions(wallet.wallet_group_id || "");
+  dialog.querySelector("[name=color_label]").value = validColor(wallet.color_label);
+  dialog.showModal();
+}
+
+function openWalletGroupDialog(groupId) {
+  const group = state.walletGroups.find((item) => item.id === groupId);
+  const dialog = $("#wallet-group-dialog");
+  dialog.querySelector("[name=wallet_group_id]").value = group.id;
+  dialog.querySelector("[name=name]").value = group.name;
+  dialog.querySelector("[name=color_label]").value = validColor(group.color_label);
+  dialog.showModal();
+}
+
+function openPrivateKeyDialog(walletId) {
+  const wallet = state.wallets.find((item) => item.id === walletId);
+  const dialog = $("#wallet-private-key-dialog");
+  dialog.querySelector("[name=wallet_id]").value = wallet.id;
+  dialog.querySelector("[name=confirm_label]").value = "";
+  dialog.querySelector("[name=password]").value = "";
+  $("#wallet-private-key-label").textContent = wallet.label;
+  dialog.showModal();
+}
+
+async function downloadAttachment(url, body) {
+  const response = await fetch(url, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body)
+  });
+  if (response.status === 401) {
+    $("#login-dialog").showModal();
+    throw new Error("Please sign in");
+  }
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    throw new Error(error.error || `Request failed (${response.status})`);
+  }
+  const disposition = response.headers.get("content-disposition") || "";
+  const match = disposition.match(/filename="([^"]+)"/);
+  const objectUrl = URL.createObjectURL(await response.blob());
+  const link = document.createElement("a");
+  link.href = objectUrl;
+  link.download = match?.[1] || "download.txt";
+  document.body.append(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(objectUrl);
+}
 
 function openAssignManagerDialog(teamId) {
   const team = state.teams.find((item) => item.id === teamId);
@@ -262,7 +406,48 @@ document.addEventListener("submit", async (event) => {
     $("#assign-manager-dialog").close();
     mutate(`/api/teams/${values.team_id}/managers`, "POST", { manager_id: values.manager_id });
   }
-  if (event.target.id === "wallet-form") mutate("/api/wallets/import", "POST", values);
+  if (event.target.id === "wallet-form") {
+    const creatingGroup = values.wallet_group_id === "__new__";
+    mutate("/api/wallets/import", "POST", {
+      label: values.label,
+      private_key: values.private_key,
+      color_label: values.color_label,
+      wallet_group_id: creatingGroup ? null : values.wallet_group_id || null,
+      ...(creatingGroup ? {
+        new_group_name: values.new_group_name,
+        new_group_color_label: values.new_group_color_label
+      } : {})
+    });
+  }
+  if (event.target.id === "wallet-edit-form") {
+    $("#wallet-edit-dialog").close();
+    mutate(`/api/wallets/${values.wallet_id}`, "PUT", {
+      label: values.label,
+      wallet_group_id: values.wallet_group_id || null,
+      color_label: values.color_label
+    });
+  }
+  if (event.target.id === "wallet-group-form") {
+    $("#wallet-group-dialog").close();
+    mutate(`/api/wallet-groups/${values.wallet_group_id}`, "PUT", {
+      name: values.name,
+      color_label: values.color_label
+    });
+  }
+  if (event.target.id === "wallet-private-key-form") {
+    const wallet = state.wallets.find((item) => item.id === values.wallet_id);
+    if (values.confirm_label !== wallet.label) {
+      return notice("Wallet label confirmation does not match.", "error");
+    }
+    try {
+      await downloadAttachment(`/api/wallets/${wallet.id}/export-private-key`, { password: values.password });
+      $("#wallet-private-key-dialog").close();
+      notice("Private key downloaded. Store it securely and remove extra copies.");
+      await load();
+    } catch (error) {
+      notice(error.message, "error");
+    }
+  }
   if (event.target.id === "route-form") mutate("/api/notification-routes", "POST", { ...values, team_id: values.team_id || null, enabled: true });
   if (event.target.id === "website-form") mutate("/api/websites", "POST", {
     ...values,
@@ -292,6 +477,23 @@ document.addEventListener("click", async (event) => {
   if (button.dataset.archiveManager && confirm("Archive this manager?")) mutate(`/api/managers/${button.dataset.archiveManager}`, "DELETE");
   if (button.dataset.archiveTeam && confirm("Archive this team?")) mutate(`/api/teams/${button.dataset.archiveTeam}`, "PUT", { active: false });
   if (button.dataset.archiveWallet && confirm("Archive this revenue wallet? Existing website assignments will remain active until changed.")) mutate(`/api/wallets/${button.dataset.archiveWallet}`, "DELETE");
+  if (button.dataset.restoreWallet && confirm("Restore this revenue wallet to the active list?")) mutate(`/api/wallets/${button.dataset.restoreWallet}`, "PUT", { active: true });
+  if (button.dataset.editWallet) openWalletEditDialog(button.dataset.editWallet);
+  if (button.dataset.editWalletGroup) openWalletGroupDialog(button.dataset.editWalletGroup);
+  if (button.dataset.exportPrivateKey) openPrivateKeyDialog(button.dataset.exportPrivateKey);
+  if (button.dataset.walletMode) { walletMode = button.dataset.walletMode; render(); }
+  if (button.dataset.exportWalletCsv !== undefined) {
+    try {
+      await downloadAttachment("/api/wallets/export-csv", { status: $("#wallet-export-status").value });
+      notice("Wallet CSV downloaded.");
+      await load();
+    } catch (error) {
+      notice(error.message, "error");
+    }
+  }
+  if (button.id === "wallet-edit-cancel") $("#wallet-edit-dialog").close();
+  if (button.id === "wallet-group-cancel") $("#wallet-group-dialog").close();
+  if (button.id === "wallet-private-key-cancel") $("#wallet-private-key-dialog").close();
   if (button.dataset.testRoute) mutate(`/api/notification-routes/${button.dataset.testRoute}/test`, "POST");
   if (button.dataset.deleteRoute && confirm("Remove this webhook route?")) mutate(`/api/notification-routes/${button.dataset.deleteRoute}`, "DELETE");
   if (button.dataset.approveManagerWallet && confirm("Approve this manager payout wallet?")) mutate(`/api/manager-wallet-requests/${button.dataset.approveManagerWallet}/approved`, "POST");
@@ -333,6 +535,7 @@ document.addEventListener("click", async (event) => {
 });
 
 document.addEventListener("change", (event) => {
+  if (event.target.id === "wallet-import-group") syncWalletImportGroup();
   if (event.target.dataset.hosted) {
     mutate(`/api/websites/${event.target.dataset.hosted}`, "PUT", { hosted: event.target.checked });
   }
