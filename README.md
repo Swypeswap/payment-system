@@ -13,7 +13,7 @@ The checked-in defaults do not move money:
 - The encryption master key stays in the Ubuntu `.env` file and must never be stored in Supabase.
 - Revenue wallets can be grouped and color-labeled. CSV exports contain metadata only; per-wallet private-key downloads are password-confirmed, explicit audited actions.
 - Domains can be grouped, color-labeled, archived, restored, and permanently deleted when they have no website history.
-- Dashboard login attempts are rate-limited and security alerts can be delivered through the global `security_alert` Discord webhook route.
+- Dashboard login attempts are rate-limited. Two failed passwords within 15 minutes block the public IPv4 address or IPv6 `/64` network for 24 hours, and security alerts can be delivered through the global `security_alert` Discord webhook route.
 - Incoming Helius events and submitted payouts are deduplicated.
 - Submitted payout transactions are stored and recovered after worker restarts.
 - Suspicious, unpriced, unroutable, or high-impact tokens are quarantined instead of swapped.
@@ -128,7 +128,7 @@ Fill the remaining Supabase, Discord, Helius, Jupiter, domain, and RPC values fr
 ## Optional Security Monitoring
 
 1. In the dashboard, save a global `security_alert` Discord webhook route.
-2. Add an `IPINFO_TOKEN` to Ubuntu `.env` to enrich alerts with VPN and proxy detection. Without it, VPN status is reported as `Unknown`.
+2. Add an `IPINFO_TOKEN` from [IPinfo](https://ipinfo.io/account/token) to Ubuntu `.env` to enrich alerts with VPN and proxy detection. The `/privacy` endpoint requires a compatible IPinfo plan. Without it, VPN status is reported as `Unknown`.
 3. Generate a separate random `SUPABASE_LOG_DRAIN_AUTH` value and add it to Ubuntu `.env`.
 4. If your Supabase plan supports Log Drains, create a generic HTTP log drain:
    - Endpoint: `https://YOUR_DASHBOARD_DOMAIN/webhooks/supabase/logs`
