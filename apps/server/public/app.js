@@ -158,13 +158,23 @@ function operationsHealthPanel() {
 
 function websites() {
   const pool = state.domains.filter((item) => item.status === "pool");
+  const assignedWalletIds = new Set(state.websites.filter((item) => item.active).map((item) => item.revenue_wallet_id));
+  const availableWallets = state.wallets.filter((wallet) => wallet.active && !assignedWalletIds.has(wallet.id));
+  const releasableDomainIds = new Set();
+  const releasableWebsiteIds = new Set();
+  for (const website of state.websites) {
+    if (!website.active && website.domains?.status === "archived" && !releasableDomainIds.has(website.domain_id)) {
+      releasableDomainIds.add(website.domain_id);
+      releasableWebsiteIds.add(website.id);
+    }
+  }
   return `
     <div class="grid two">
       <article class="card"><h3>Assign website</h3>
         <form id="website-form" class="form-grid">
           <label>Domain<select name="domain_id" required>${option(pool, "id", "domain", "Choose pooled domain")}</select></label>
           <label>Team<select name="team_id" required>${option(state.teams.filter(t => t.active), "id", "name", "Choose team")}</select></label>
-          <label>Revenue wallet<select name="revenue_wallet_id" required>${option(state.wallets.filter(w => w.active), "id", "label", "Choose wallet")}</select></label>
+          <label>Revenue wallet<select name="revenue_wallet_id" required>${option(availableWallets, "id", "label", "Choose available wallet")}</select></label>
           <label>Threshold override<input name="threshold_usd" type="number" step="0.01" placeholder="Use global" /></label>
           <label>SOL reserve override<input name="sol_reserve" type="number" step="0.000000001" placeholder="Use global" /></label>
           <label class="full">Remarks<textarea name="remarks" placeholder="Internal or launch remarks"></textarea></label>
@@ -177,7 +187,7 @@ function websites() {
           <td>${esc(item.domains?.domain)}<br /><small>${item.active ? "Active" : "Archived"}</small></td>
           <td>${esc(item.teams?.name)}</td><td><code>${esc(short(item.revenue_wallets?.address))}</code></td>
           <td><label class="toggle"><input data-hosted="${item.id}" type="checkbox" ${item.hosted ? "checked" : ""} ${!item.active ? "disabled" : ""}/><span class="slider"></span></label></td>
-          <td><div class="actions"><button class="small ghost" data-edit-website="${item.id}">Edit</button><button class="small ghost danger" data-archive-website="${item.id}">Archive</button></div></td>
+          <td><div class="actions">${item.active ? `<button class="small ghost" data-edit-website="${item.id}">Edit</button><button class="small ghost danger" data-archive-website="${item.id}">Archive</button>` : releasableWebsiteIds.has(item.id) ? `<button class="small ghost" data-release-domain="${item.id}">Return domain to pool</button>` : "<small>History retained</small>"}</div></td>
         </tr>`).join("")}</tbody></table></div>
       </article>
     </div>`;
@@ -682,6 +692,7 @@ document.addEventListener("click", async (event) => {
   if (button.dataset.editDomainGroup) openDomainGroupDialog(button.dataset.editDomainGroup);
   if (button.dataset.domainMode) { domainMode = button.dataset.domainMode; render(); }
   if (button.dataset.archiveWebsite && confirm("Archive this website and domain?")) mutate(`/api/websites/${button.dataset.archiveWebsite}`, "DELETE");
+  if (button.dataset.releaseDomain && confirm("Return this archived domain to the assignment pool? Its existing website history will be preserved.")) mutate(`/api/websites/${button.dataset.releaseDomain}/release-domain`, "POST");
   if (button.dataset.archiveManager && confirm("Archive this manager?")) mutate(`/api/managers/${button.dataset.archiveManager}`, "DELETE");
   if (button.dataset.archiveTeam && confirm("Archive this team?")) mutate(`/api/teams/${button.dataset.archiveTeam}`, "PUT", { active: false });
   if (button.dataset.archiveWallet && confirm("Archive this revenue wallet? Existing website assignments will remain active until changed.")) mutate(`/api/wallets/${button.dataset.archiveWallet}`, "DELETE");
@@ -740,7 +751,8 @@ document.addEventListener("click", async (event) => {
   }
   if (button.dataset.editWebsite) {
     const website = state.websites.find(w => w.id === button.dataset.editWebsite);
-    const wallets = state.wallets.filter(w => w.active).map(w => `${w.label}: ${w.id}`).join("\n");
+    const usedWalletIds = new Set(state.websites.filter(w => w.active && w.id !== website.id).map(w => w.revenue_wallet_id));
+    const wallets = state.wallets.filter(w => w.active && !usedWalletIds.has(w.id)).map(w => `${w.label}: ${w.id}`).join("\n");
     const revenue_wallet_id = prompt(`Revenue wallet ID:\n\n${wallets}`, website.revenue_wallet_id);
     if (revenue_wallet_id === null) return;
     const threshold_usd = prompt("Threshold USD override (blank uses global):", website.threshold_usd ?? "");

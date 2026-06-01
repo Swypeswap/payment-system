@@ -13,6 +13,7 @@ The checked-in defaults do not move money:
 - The encryption master key stays in the Ubuntu `.env` file and must never be stored in Supabase.
 - Revenue wallets can be grouped and color-labeled. CSV exports contain metadata only; per-wallet private-key downloads are password-confirmed, explicit audited actions.
 - Domains can be grouped, color-labeled, archived, restored, and permanently deleted when they have no website history.
+- Archived website assignments retain their audit history. Return an archived domain to the pool before linking it again; only one active website can use a domain or revenue wallet at a time.
 - Dashboard login attempts are rate-limited. Two failed passwords within 15 minutes block the public IPv4 address or IPv6 `/64` network for a randomized 96-hour to five-week period, and security alerts can be delivered through the global `security_alert` Discord webhook route.
 - Network blocks include a one-time VPS recovery code in the owners security webhook. Three distinct blocked networks within 15 minutes automatically place only the frontend into lockdown while Helius ingestion, Supabase log ingestion, health checks, and the payout worker continue running.
 - Dashboard sessions are backed by durable records. The Security page lists active IP addresses and devices and can revoke every session immediately. New-login webhooks link directly to that authenticated review page.

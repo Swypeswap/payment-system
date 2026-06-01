@@ -658,6 +658,18 @@ export async function registerRoutes(app: FastifyInstance) {
       if (current.status === "assigned" && values.status === "archived") {
         throw new Error("Archive the assigned website before archiving its domain");
       }
+      if (values.status === "pool") {
+        const activeAssignment = await db
+          .from("websites")
+          .select("id")
+          .eq("domain_id", id)
+          .eq("active", true)
+          .maybeSingle();
+        if (activeAssignment.error) throw new Error(activeAssignment.error.message);
+        if (activeAssignment.data) {
+          throw new Error("Domain is still linked to an active website");
+        }
+      }
       const update = {
         ...values,
         domain: values.domain ? parseDomain(values.domain) : undefined
@@ -1136,6 +1148,18 @@ export async function registerRoutes(app: FastifyInstance) {
       ) {
         throw new Error("Website payout percentages must add up to 100");
       }
+      const [domain, wallet] = await Promise.all([
+        db.from("domains").select("status").eq("id", values.domain_id).single(),
+        db.from("revenue_wallets").select("active").eq("id", values.revenue_wallet_id).single()
+      ]);
+      if (domain.error) throw new Error(domain.error.message);
+      if (wallet.error) throw new Error(wallet.error.message);
+      if (domain.data.status !== "pool") {
+        throw new Error("Domain is not available in the assignment pool");
+      }
+      if (!wallet.data.active) {
+        throw new Error("Revenue wallet is archived");
+      }
       const insert = {
         ...values,
         company_wallet_address: values.company_wallet_address
@@ -1189,10 +1213,25 @@ export async function registerRoutes(app: FastifyInstance) {
       const previous = unwrap(
         await db
           .from("websites")
-          .select("hosted,team_id,remarks,domains(domain)")
+          .select("active,hosted,team_id,remarks,domains(domain)")
           .eq("id", id)
           .single()
-      ) as { hosted: boolean; team_id: string; remarks: string; domains: { domain: string } };
+      ) as { active: boolean; hosted: boolean; team_id: string; remarks: string; domains: { domain: string } };
+      if (!previous.active) {
+        throw new Error("Archived website history cannot be edited");
+      }
+      if (values.revenue_wallet_id) {
+        const wallet = unwrap(
+          await db
+            .from("revenue_wallets")
+            .select("active")
+            .eq("id", values.revenue_wallet_id)
+            .single()
+        );
+        if (!wallet.active) {
+          throw new Error("Revenue wallet is archived");
+        }
+      }
       const update = {
         ...values,
         company_wallet_address: values.company_wallet_address
@@ -1232,8 +1271,11 @@ export async function registerRoutes(app: FastifyInstance) {
     protectedApi.delete("/api/websites/:id", async (request) => {
       const { id } = z.object({ id: uuid }).parse(request.params);
       const website = unwrap(
-        await db.from("websites").select("domain_id").eq("id", id).single()
+        await db.from("websites").select("domain_id,active").eq("id", id).single()
       );
+      if (!website.active) {
+        throw new Error("Website is already archived");
+      }
       unwrap(
         await db
           .from("websites")
@@ -1251,6 +1293,39 @@ export async function registerRoutes(app: FastifyInstance) {
           .single()
       );
       await audit("website.archived", "website", id);
+      return { ok: true };
+    });
+
+    protectedApi.post("/api/websites/:id/release-domain", async (request) => {
+      const { id } = z.object({ id: uuid }).parse(request.params);
+      const website = unwrap(
+        await db.from("websites").select("domain_id,active").eq("id", id).single()
+      );
+      if (website.active) {
+        throw new Error("Archive the website before returning its domain to the assignment pool");
+      }
+      const activeAssignment = await db
+        .from("websites")
+        .select("id")
+        .eq("domain_id", website.domain_id)
+        .eq("active", true)
+        .maybeSingle();
+      if (activeAssignment.error) throw new Error(activeAssignment.error.message);
+      if (activeAssignment.data) {
+        throw new Error("Domain is already linked to a newer active website");
+      }
+      unwrap(
+        await db
+          .from("domains")
+          .update({ status: "pool" })
+          .eq("id", website.domain_id)
+          .eq("status", "archived")
+          .select("id")
+          .single()
+      );
+      await audit("website.domain_returned_to_pool", "website", id, {
+        domain_id: website.domain_id
+      });
       return { ok: true };
     });
 
