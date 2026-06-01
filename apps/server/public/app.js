@@ -2,6 +2,7 @@ const pages = ["overview", "websites", "teams", "wallets", "domains", "webhooks"
 let state = null;
 let page = "overview";
 let walletMode = "active";
+let domainMode = "active";
 
 const $ = (selector) => document.querySelector(selector);
 const esc = (value = "") => String(value).replace(/[&<>"']/g, (char) => ({
@@ -11,6 +12,16 @@ const short = (value = "") => value ? `${value.slice(0, 5)}...${value.slice(-5)}
 const date = (value) => value ? new Date(value).toLocaleString() : "-";
 const nestedDomain = (record) => record?.websites?.domains?.domain ?? record?.domains?.domain ?? "-";
 
+function clearPasswordInputs() {
+  document.querySelectorAll('input[type="password"]').forEach((input) => { input.value = ""; });
+}
+
+function showLoginDialog() {
+  clearPasswordInputs();
+  const dialog = $("#login-dialog");
+  if (!dialog.open) dialog.showModal();
+}
+
 async function api(url, options = {}) {
   const response = await fetch(url, {
     ...options,
@@ -18,7 +29,7 @@ async function api(url, options = {}) {
   });
   const body = await response.json().catch(() => ({}));
   if (response.status === 401) {
-    $("#login-dialog").showModal();
+    showLoginDialog();
     throw new Error("Please sign in");
   }
   if (!response.ok) throw new Error(body.error || `Request failed (${response.status})`);
@@ -58,9 +69,16 @@ function validColor(value, fallback = "#64f5b5") {
 }
 
 const walletCount = (count) => `${count} wallet${count === 1 ? "" : "s"}`;
+const domainCount = (count) => `${count} domain${count === 1 ? "" : "s"}`;
 
 function walletGroupOptions(selected = "") {
   return `<option value="" ${selected ? "" : "selected"}>Ungrouped</option>${state.walletGroups.map((group) =>
+    `<option value="${esc(group.id)}" ${group.id === selected ? "selected" : ""}>${esc(group.name)}</option>`
+  ).join("")}`;
+}
+
+function domainGroupOptions(selected = "") {
+  return `<option value="" ${selected ? "" : "selected"}>Ungrouped</option>${state.domainGroups.map((group) =>
     `<option value="${esc(group.id)}" ${group.id === selected ? "selected" : ""}>${esc(group.name)}</option>`
   ).join("")}`;
 }
@@ -224,10 +242,70 @@ function wallets() {
 }
 
 function domains() {
+  const shownDomains = state.domains.filter((domain) => (domain.status !== "archived") === (domainMode === "active"));
+  const groups = [
+    ...state.domainGroups.map((group) => ({
+      ...group,
+      domains: shownDomains.filter((domain) => domain.domain_group_id === group.id)
+    })),
+    {
+      id: "",
+      name: "Ungrouped",
+      color_label: "#8d7a9d",
+      domains: shownDomains.filter((domain) => !domain.domain_group_id)
+    }
+  ].filter((group) => group.domains.length);
+  const rowsFor = (group) => group.domains.map((domain) => `
+    <tr>
+      <td><span class="color-dot" style="--label-color:${esc(validColor(domain.color_label, group.color_label))}"></span><strong>${esc(domain.domain)}</strong></td>
+      <td><span class="chip ${domain.status === "archived" ? "bad" : domain.status === "assigned" ? "warn" : "good"}">${esc(domain.status)}</span></td>
+      <td><div class="actions">
+        <button class="small ghost" data-edit-domain="${domain.id}">Edit</button>
+        ${domain.status === "archived"
+          ? `<button class="small ghost" data-restore-domain="${domain.id}">Restore</button>`
+          : domain.status === "pool"
+            ? `<button class="small ghost danger" data-archive-domain="${domain.id}">Archive</button>`
+            : ""}
+        <button class="small ghost danger" data-delete-domain="${domain.id}">Delete</button>
+      </div></td>
+    </tr>`).join("");
+  const groupCards = groups.map((group) => `
+    <article class="card wallet-group" style="--wallet-group-color:${esc(validColor(group.color_label, "#8d7a9d"))}">
+      <div class="wallet-group-heading">
+        <div><span class="color-dot"></span><strong>${esc(group.name)}</strong><small>${domainCount(group.domains.length)}</small></div>
+        ${group.id ? `<button class="small ghost" data-edit-domain-group="${group.id}">Edit group</button>` : ""}
+      </div>
+      <div class="table-wrap"><table><thead><tr><th>Domain</th><th>Status</th><th>Actions</th></tr></thead>
+      <tbody>${rowsFor(group)}</tbody></table></div>
+    </article>`).join("");
   return `<div class="grid two">
-    <article class="card"><h3>Bulk import</h3><form id="domain-form" class="stack"><label>Domains<textarea name="domains" required placeholder="example.com, another-site.com"></textarea></label><button>Import domains</button></form></article>
-    <article class="card"><h3>Domain pool</h3><div class="table-wrap"><table><thead><tr><th>Domain</th><th>Status</th><th>Action</th></tr></thead>
-    <tbody>${state.domains.map((item) => `<tr><td>${esc(item.domain)}</td><td>${esc(item.status)}</td><td><button class="small ghost danger" data-archive-domain="${item.id}">Archive</button></td></tr>`).join("")}</tbody></table></div></article></div>`;
+    <article class="card"><h3>Import domains</h3><p><small>Add domains in batches and label them immediately.</small></p>
+      <form id="domain-form" class="stack">
+        <label>Domains<textarea name="domains" required placeholder="example.com, another-site.com"></textarea></label>
+        <label>Domain color<input name="color_label" type="color" value="#ff315f" required /></label>
+        <label>Group<select name="domain_group_id" id="domain-import-group">${domainGroupOptions()}<option value="__new__">+ Create new group</option></select></label>
+        <div class="form-grid" id="domain-new-group-fields" hidden>
+          <label>New group name<input name="new_group_name" /></label>
+          <label>New group color<input name="new_group_color_label" type="color" value="#ff315f" /></label>
+        </div>
+        <button>Import domains</button>
+      </form>
+    </article>
+    <article class="card"><h3>Domain organization</h3><p><small>Colors can be adjusted per group and per domain after import.</small></p>
+      <div class="stack">
+        ${state.domainGroups.map((group) => `<div class="wallet-group-summary"><span class="color-dot" style="--label-color:${esc(validColor(group.color_label))}"></span><strong>${esc(group.name)}</strong><small>${domainCount(state.domains.filter((domain) => domain.domain_group_id === group.id).length)}</small><button class="small ghost" data-edit-domain-group="${group.id}">Edit</button></div>`).join("") || "<small>No groups yet. Create one while importing a domain.</small>"}
+      </div>
+    </article>
+    <article class="card full">
+      <div class="wallet-toolbar">
+        <div class="segmented">
+          <button class="${domainMode === "active" ? "active" : ""}" data-domain-mode="active">Active (${state.domains.filter((domain) => domain.status !== "archived").length})</button>
+          <button class="${domainMode === "archived" ? "active" : ""}" data-domain-mode="archived">Archived (${state.domains.filter((domain) => domain.status === "archived").length})</button>
+        </div>
+      </div>
+    </article>
+    <div class="stack full">${groupCards || `<article class="card"><small>No ${domainMode} domains.</small></article>`}</div>
+  </div>`;
 }
 
 function webhooks() {
@@ -292,12 +370,14 @@ function render() {
   $("#system-status").className = `status-pill ${state.settings.emergency_paused ? "bad" : state.settings.live_payouts_enabled ? "good" : "warn"}`;
   $("#content").innerHTML = ({ overview, websites, teams, wallets, domains, webhooks, activity, settings }[page])();
   if (page === "wallets") syncWalletImportGroup();
+  if (page === "domains") syncDomainImportGroup();
 }
 
 async function load() {
   try {
     state = await api("/api/bootstrap");
     $("#login-dialog").close();
+    clearPasswordInputs();
     render();
   } catch (error) {
     if (error.message !== "Please sign in") notice(error.message, "error");
@@ -313,6 +393,15 @@ function splitIds(value) { return value.split(",").map(v => v.trim()).filter(Boo
 function syncWalletImportGroup() {
   const select = $("#wallet-import-group");
   const fields = $("#wallet-new-group-fields");
+  if (!select || !fields) return;
+  const creating = select.value === "__new__";
+  fields.hidden = !creating;
+  fields.querySelector("[name=new_group_name]").required = creating;
+}
+
+function syncDomainImportGroup() {
+  const select = $("#domain-import-group");
+  const fields = $("#domain-new-group-fields");
   if (!select || !fields) return;
   const creating = select.value === "__new__";
   fields.hidden = !creating;
@@ -343,8 +432,27 @@ function openPrivateKeyDialog(walletId) {
   const dialog = $("#wallet-private-key-dialog");
   dialog.querySelector("[name=wallet_id]").value = wallet.id;
   dialog.querySelector("[name=confirm_label]").value = "";
-  dialog.querySelector("[name=password]").value = "";
+  dialog.querySelector("[name=dashboard_export_secret]").value = "";
   $("#wallet-private-key-label").textContent = wallet.label;
+  dialog.showModal();
+}
+
+function openDomainEditDialog(domainId) {
+  const domain = state.domains.find((item) => item.id === domainId);
+  const dialog = $("#domain-edit-dialog");
+  dialog.querySelector("[name=domain_id]").value = domain.id;
+  dialog.querySelector("[name=domain]").value = domain.domain;
+  dialog.querySelector("[name=domain_group_id]").innerHTML = domainGroupOptions(domain.domain_group_id || "");
+  dialog.querySelector("[name=color_label]").value = validColor(domain.color_label, "#ff315f");
+  dialog.showModal();
+}
+
+function openDomainGroupDialog(groupId) {
+  const group = state.domainGroups.find((item) => item.id === groupId);
+  const dialog = $("#domain-group-dialog");
+  dialog.querySelector("[name=domain_group_id]").value = group.id;
+  dialog.querySelector("[name=name]").value = group.name;
+  dialog.querySelector("[name=color_label]").value = validColor(group.color_label, "#ff315f");
   dialog.showModal();
 }
 
@@ -355,7 +463,7 @@ async function downloadAttachment(url, body) {
     body: JSON.stringify(body)
   });
   if (response.status === 401) {
-    $("#login-dialog").showModal();
+    showLoginDialog();
     throw new Error("Please sign in");
   }
   if (!response.ok) {
@@ -395,10 +503,37 @@ document.addEventListener("submit", async (event) => {
   event.preventDefault();
   const values = data(event.target);
   if (event.target.id === "login-form") {
-    try { await api("/api/login", { method: "POST", body: JSON.stringify(values) }); await load(); }
+    try { await api("/api/login", { method: "POST", body: JSON.stringify({ password: values.dashboard_access_secret }) }); await load(); }
     catch (error) { $("#login-error").textContent = error.message; }
+    finally { clearPasswordInputs(); }
   }
-  if (event.target.id === "domain-form") mutate("/api/domains/import", "POST", values);
+  if (event.target.id === "domain-form") {
+    const creatingGroup = values.domain_group_id === "__new__";
+    mutate("/api/domains/import", "POST", {
+      domains: values.domains,
+      color_label: values.color_label,
+      domain_group_id: creatingGroup ? null : values.domain_group_id || null,
+      ...(creatingGroup ? {
+        new_group_name: values.new_group_name,
+        new_group_color_label: values.new_group_color_label
+      } : {})
+    });
+  }
+  if (event.target.id === "domain-edit-form") {
+    $("#domain-edit-dialog").close();
+    mutate(`/api/domains/${values.domain_id}`, "PUT", {
+      domain: values.domain,
+      domain_group_id: values.domain_group_id || null,
+      color_label: values.color_label
+    });
+  }
+  if (event.target.id === "domain-group-form") {
+    $("#domain-group-dialog").close();
+    mutate(`/api/domain-groups/${values.domain_group_id}`, "PUT", {
+      name: values.name,
+      color_label: values.color_label
+    });
+  }
   if (event.target.id === "owner-form") mutate("/api/owners", "POST", Object.fromEntries(Object.entries(values).filter(([, v]) => v !== "")));
   if (event.target.id === "manager-form") mutate("/api/managers", "POST", values);
   if (event.target.id === "team-form") mutate("/api/teams", "POST", Object.fromEntries(Object.entries(values).filter(([, v]) => v !== "")));
@@ -437,15 +572,19 @@ document.addEventListener("submit", async (event) => {
   if (event.target.id === "wallet-private-key-form") {
     const wallet = state.wallets.find((item) => item.id === values.wallet_id);
     if (values.confirm_label !== wallet.label) {
+      clearPasswordInputs();
       return notice("Wallet label confirmation does not match.", "error");
     }
     try {
-      await downloadAttachment(`/api/wallets/${wallet.id}/export-private-key`, { password: values.password });
+      await downloadAttachment(`/api/wallets/${wallet.id}/export-private-key`, { password: values.dashboard_export_secret });
       $("#wallet-private-key-dialog").close();
+      clearPasswordInputs();
       notice("Private key downloaded. Store it securely and remove extra copies.");
       await load();
     } catch (error) {
       notice(error.message, "error");
+    } finally {
+      clearPasswordInputs();
     }
   }
   if (event.target.id === "route-form") mutate("/api/notification-routes", "POST", { ...values, team_id: values.team_id || null, enabled: true });
@@ -472,7 +611,12 @@ document.addEventListener("click", async (event) => {
   if (!button) return;
   if (button.dataset.page) { page = button.dataset.page; render(); }
   if (button.id === "logout") { await api("/api/logout", { method: "POST" }); location.reload(); }
-  if (button.dataset.archiveDomain && confirm("Archive this domain?")) mutate(`/api/domains/${button.dataset.archiveDomain}`, "DELETE");
+  if (button.dataset.archiveDomain && confirm("Archive this domain?")) mutate(`/api/domains/${button.dataset.archiveDomain}/archive`, "POST");
+  if (button.dataset.restoreDomain && confirm("Restore this domain to the active list?")) mutate(`/api/domains/${button.dataset.restoreDomain}`, "PUT", { status: "pool" });
+  if (button.dataset.deleteDomain && confirm("Permanently delete this domain? Domains with website history must be archived instead.")) mutate(`/api/domains/${button.dataset.deleteDomain}`, "DELETE");
+  if (button.dataset.editDomain) openDomainEditDialog(button.dataset.editDomain);
+  if (button.dataset.editDomainGroup) openDomainGroupDialog(button.dataset.editDomainGroup);
+  if (button.dataset.domainMode) { domainMode = button.dataset.domainMode; render(); }
   if (button.dataset.archiveWebsite && confirm("Archive this website and domain?")) mutate(`/api/websites/${button.dataset.archiveWebsite}`, "DELETE");
   if (button.dataset.archiveManager && confirm("Archive this manager?")) mutate(`/api/managers/${button.dataset.archiveManager}`, "DELETE");
   if (button.dataset.archiveTeam && confirm("Archive this team?")) mutate(`/api/teams/${button.dataset.archiveTeam}`, "PUT", { active: false });
@@ -493,7 +637,9 @@ document.addEventListener("click", async (event) => {
   }
   if (button.id === "wallet-edit-cancel") $("#wallet-edit-dialog").close();
   if (button.id === "wallet-group-cancel") $("#wallet-group-dialog").close();
-  if (button.id === "wallet-private-key-cancel") $("#wallet-private-key-dialog").close();
+  if (button.id === "wallet-private-key-cancel") { $("#wallet-private-key-dialog").close(); clearPasswordInputs(); }
+  if (button.id === "domain-edit-cancel") $("#domain-edit-dialog").close();
+  if (button.id === "domain-group-cancel") $("#domain-group-dialog").close();
   if (button.dataset.testRoute) mutate(`/api/notification-routes/${button.dataset.testRoute}/test`, "POST");
   if (button.dataset.deleteRoute && confirm("Remove this webhook route?")) mutate(`/api/notification-routes/${button.dataset.deleteRoute}`, "DELETE");
   if (button.dataset.approveManagerWallet && confirm("Approve this manager payout wallet?")) mutate(`/api/manager-wallet-requests/${button.dataset.approveManagerWallet}/approved`, "POST");
@@ -536,10 +682,14 @@ document.addEventListener("click", async (event) => {
 
 document.addEventListener("change", (event) => {
   if (event.target.id === "wallet-import-group") syncWalletImportGroup();
+  if (event.target.id === "domain-import-group") syncDomainImportGroup();
   if (event.target.dataset.hosted) {
     mutate(`/api/websites/${event.target.dataset.hosted}`, "PUT", { hosted: event.target.checked });
   }
 });
 
 renderNav();
+clearPasswordInputs();
+window.addEventListener("pageshow", clearPasswordInputs);
+setTimeout(clearPasswordInputs, 0);
 load();

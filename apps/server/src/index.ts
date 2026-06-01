@@ -7,11 +7,24 @@ import Fastify from "fastify";
 import { env } from "./env.js";
 import { registerRoutes } from "./routes.js";
 
-const app = Fastify({ logger: true });
+const app = Fastify({ logger: true, trustProxy: 1 });
 const publicDir = path.join(path.dirname(fileURLToPath(import.meta.url)), "../public");
 
 await app.register(cookie);
 await app.register(rateLimit, { global: false });
+app.addHook("onSend", async (_request, reply) => {
+  reply
+    .header("content-security-policy", "default-src 'self'; img-src 'self' https://files.catbox.moe data:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; object-src 'none'")
+    .header("cross-origin-opener-policy", "same-origin")
+    .header("cross-origin-resource-policy", "same-origin")
+    .header("permissions-policy", "camera=(), microphone=(), geolocation=()")
+    .header("referrer-policy", "no-referrer")
+    .header("x-content-type-options", "nosniff")
+    .header("x-frame-options", "DENY");
+  if (env.NODE_ENV === "production") {
+    reply.header("strict-transport-security", "max-age=31536000; includeSubDomains");
+  }
+});
 await app.register(fastifyStatic, {
   root: publicDir,
   prefix: "/"

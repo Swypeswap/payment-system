@@ -10,6 +10,8 @@ const envSchema = z.object({
   DASHBOARD_PASSWORD_HASH: z.string().min(20),
   SESSION_SECRET: z.string().min(32),
   HELIUS_WEBHOOK_AUTH: z.string().min(20),
+  SUPABASE_LOG_DRAIN_AUTH: z.string().min(20).optional(),
+  IPINFO_TOKEN: z.string().min(1).optional(),
   PUBLIC_BASE_URL: z.string().url().optional()
 });
 

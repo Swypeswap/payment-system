@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Solana Payout Control</title>
+    <title>Confetti Revenue Control</title>
     <link rel="stylesheet" href="/styles.css" />
     <script type="module" src="/app.js"></script>
   </head>
@@ -11,10 +11,10 @@
     <div class="shell">
       <aside class="sidebar">
         <div class="brand">
-          <span class="brand-mark">S</span>
+          <img class="brand-logo" src="/confetti-logo.png" alt="Confetti logo" />
           <div>
-            <strong>Solana Payout</strong>
-            <small>Control center</small>
+            <strong>Confetti</strong>
+            <small>Revenue control</small>
           </div>
         </div>
         <nav id="nav"></nav>
@@ -34,11 +34,12 @@
     </div>
 
     <dialog id="login-dialog">
-      <form id="login-form" method="dialog" class="login-card">
+      <form id="login-form" method="dialog" class="login-card" autocomplete="off">
+        <img class="login-logo" src="/confetti-logo.png" alt="Confetti logo" />
         <p class="eyebrow">PRIVATE DASHBOARD</p>
         <h2>Staff access</h2>
         <p>Enter the shared staff password to continue.</p>
-        <label>Password<input type="password" name="password" autocomplete="current-password" required /></label>
+        <label>Password<input type="password" name="dashboard_access_secret" autocomplete="new-password" autocapitalize="off" spellcheck="false" data-1p-ignore data-lpignore="true" required /></label>
         <button type="submit">Unlock dashboard</button>
         <small id="login-error"></small>
       </form>
@@ -97,10 +98,41 @@
         <p>This downloads the decrypted private key for <strong id="wallet-private-key-label"></strong>. Store it securely and remove unnecessary copies.</p>
         <input type="hidden" name="wallet_id" />
         <label>Type the wallet label to confirm<input name="confirm_label" autocomplete="off" required /></label>
-        <label>Confirm dashboard password<input name="password" type="password" autocomplete="current-password" required /></label>
+        <label>Confirm dashboard password<input name="dashboard_export_secret" type="password" autocomplete="new-password" autocapitalize="off" spellcheck="false" data-1p-ignore data-lpignore="true" required /></label>
         <div class="modal-actions">
           <button type="button" class="ghost" id="wallet-private-key-cancel">Cancel</button>
           <button type="submit" class="danger-action">Export private key</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="domain-edit-dialog">
+      <form id="domain-edit-form" class="modal-card">
+        <p class="eyebrow">DOMAIN ORGANIZATION</p>
+        <h2>Edit domain</h2>
+        <p>Update the domain, group, and visual label.</p>
+        <input type="hidden" name="domain_id" />
+        <label>Domain<input name="domain" required /></label>
+        <label>Group<select name="domain_group_id"></select></label>
+        <label>Domain color<input name="color_label" type="color" required /></label>
+        <div class="modal-actions">
+          <button type="button" class="ghost" id="domain-edit-cancel">Cancel</button>
+          <button type="submit">Save domain</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="domain-group-dialog">
+      <form id="domain-group-form" class="modal-card">
+        <p class="eyebrow">DOMAIN ORGANIZATION</p>
+        <h2>Edit group</h2>
+        <p>Change the name and visual label for this domain group.</p>
+        <input type="hidden" name="domain_group_id" />
+        <label>Group name<input name="name" required /></label>
+        <label>Group color<input name="color_label" type="color" required /></label>
+        <div class="modal-actions">
+          <button type="button" class="ghost" id="domain-group-cancel">Cancel</button>
+          <button type="submit">Save group</button>
         </div>
       </form>
     </dialog>

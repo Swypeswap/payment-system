@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, timingSafeEqual } from "node:crypto";
 import bcrypt from "bcryptjs";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import {
@@ -15,12 +15,17 @@ import { audit } from "./audit.js";
 import { db, unwrap } from "./db.js";
 import { env } from "./env.js";
 import { encryptWebhookUrl, listRedactedRoutes, sendWebhook } from "./notifications.js";
+import { sendDashboardSecurityAlert, sendSupabaseSecurityAlerts, supabaseLogsFrom } from "./security.js";
 import { createSessionToken, dashboardCookie, isValidSession } from "./session.js";
 
 const uuid = z.string().uuid();
 const optionalNumber = z.number().nonnegative().nullable().optional();
 const percent = z.number().min(0).max(100);
 const colorLabel = z.string().regex(/^#[0-9a-fA-F]{6}$/);
+const loginFailures = new Map<string, { attempts: number; firstAttemptAt: number; blockedUntil: number }>();
+const LOGIN_FAILURE_WINDOW_MS = 15 * 60 * 1000;
+const LOGIN_BLOCK_MS = 15 * 60 * 1000;
+const LOGIN_MAX_FAILURES = 5;
 
 function csvCell(value: unknown): string {
   return `"${String(value ?? "").replaceAll('"', '""')}"`;
@@ -29,6 +34,34 @@ function csvCell(value: unknown): string {
 function downloadFilename(label: string): string {
   const normalized = label.replace(/[^a-z0-9_-]+/gi, "-").replace(/^-+|-+$/g, "");
   return normalized || "revenue-wallet";
+}
+
+function secureEqual(actual: string | undefined, expected: string): boolean {
+  if (!actual) return false;
+  const actualHash = createHash("sha256").update(actual).digest();
+  const expectedHash = createHash("sha256").update(expected).digest();
+  return timingSafeEqual(actualHash, expectedHash);
+}
+
+function sendSecurityAlert(request: FastifyRequest, title: string, metadata: Record<string, unknown>) {
+  void sendDashboardSecurityAlert(request, title, metadata).catch((error) => {
+    request.log.warn({ error }, "Could not send security webhook");
+  });
+}
+
+function failedLoginState(ip: string) {
+  const now = Date.now();
+  const current = loginFailures.get(ip);
+  if (!current || now - current.firstAttemptAt > LOGIN_FAILURE_WINDOW_MS) {
+    const reset = { attempts: 1, firstAttemptAt: now, blockedUntil: 0 };
+    loginFailures.set(ip, reset);
+    return reset;
+  }
+  current.attempts += 1;
+  if (current.attempts >= LOGIN_MAX_FAILURES) {
+    current.blockedUntil = now + LOGIN_BLOCK_MS;
+  }
+  return current;
 }
 
 function getHeliusSignature(payload: Record<string, unknown>): string | undefined {
@@ -135,14 +168,52 @@ async function requestTeamWalletUpdate(teamId: string, address: string, actorId:
 export async function registerRoutes(app: FastifyInstance) {
   app.post(
     "/api/login",
-    { config: { rateLimit: { max: 8, timeWindow: "1 minute" } } },
+    {
+      config: {
+        rateLimit: {
+          max: 10,
+          ban: 2,
+          continueExceeding: true,
+          exponentialBackoff: true,
+          timeWindow: "15 minutes",
+          onExceeded: (request: FastifyRequest) => {
+            sendSecurityAlert(request, "Dashboard login rate limit exceeded", {
+              event: "login_rate_limit",
+              severity: "high"
+            });
+          }
+        }
+      }
+    },
     async (request, reply) => {
+      const now = Date.now();
+      const existing = loginFailures.get(request.ip);
+      if (existing?.blockedUntil && existing.blockedUntil > now) {
+        sendSecurityAlert(request, "Blocked dashboard login attempt", {
+          event: "login_blocked",
+          severity: "high",
+          failed_attempts: existing.attempts
+        });
+        return reply.code(429).send({ error: "Too many failed login attempts. Try again later." });
+      }
+
       const { password } = z.object({ password: z.string().min(1) }).parse(request.body);
       if (!(await bcrypt.compare(password, env.DASHBOARD_PASSWORD_HASH))) {
+        const failures = failedLoginState(request.ip);
+        sendSecurityAlert(request, failures.blockedUntil ? "Dashboard login blocked after repeated failures" : "Dashboard login failed", {
+          event: failures.blockedUntil ? "login_blocked" : "login_failed",
+          severity: failures.attempts >= 3 ? "high" : "warning",
+          failed_attempts: failures.attempts
+        });
         return reply.code(401).send({ error: "Invalid password" });
       }
+      loginFailures.delete(request.ip);
       const token = await createSessionToken();
       reply.setCookie(dashboardCookie.name, token, dashboardCookie.options);
+      sendSecurityAlert(request, "Dashboard login succeeded", {
+        event: "login_succeeded",
+        severity: "info"
+      });
       return { ok: true };
     }
   );
@@ -153,7 +224,7 @@ export async function registerRoutes(app: FastifyInstance) {
   });
 
   app.post("/webhooks/helius", async (request, reply) => {
-    if (request.headers.authorization !== env.HELIUS_WEBHOOK_AUTH) {
+    if (!secureEqual(request.headers.authorization, env.HELIUS_WEBHOOK_AUTH)) {
       return reply.code(401).send({ error: "Unauthorized" });
     }
     const deliveries = z.array(z.record(z.unknown())).parse(request.body);
@@ -177,6 +248,18 @@ export async function registerRoutes(app: FastifyInstance) {
     return { ok: true };
   });
 
+  app.post("/webhooks/supabase/logs", { bodyLimit: 2 * 1024 * 1024 }, async (request, reply) => {
+    if (!env.SUPABASE_LOG_DRAIN_AUTH) {
+      return reply.code(503).send({ error: "Supabase log drain receiver is not configured" });
+    }
+    if (!secureEqual(request.headers.authorization, `Bearer ${env.SUPABASE_LOG_DRAIN_AUTH}`)) {
+      return reply.code(401).send({ error: "Unauthorized" });
+    }
+    const logs = supabaseLogsFrom(request.body);
+    const alerts = await sendSupabaseSecurityAlerts(logs);
+    return { ok: true, received: logs.length, alerts };
+  });
+
   app.register(async (protectedApi) => {
     protectedApi.addHook("preHandler", requireDashboard);
 
@@ -189,6 +272,7 @@ export async function registerRoutes(app: FastifyInstance) {
         wallets,
         walletGroups,
         domains,
+        domainGroups,
         websites,
         requests,
         deposits,
@@ -213,7 +297,8 @@ export async function registerRoutes(app: FastifyInstance) {
           .select("id,label,address,active,wallet_group_id,color_label,created_at,updated_at,wallet_groups(id,name,color_label)")
           .order("label"),
         db.from("wallet_groups").select("*").order("name"),
-        db.from("domains").select("*").order("domain"),
+        db.from("domains").select("*,domain_groups(id,name,color_label)").order("domain"),
+        db.from("domain_groups").select("*").order("name"),
         db
           .from("websites")
           .select("*,domains(domain,status),teams(name,manager_wallet_address,payout_discord_channel_id),revenue_wallets(label,address)")
@@ -238,6 +323,7 @@ export async function registerRoutes(app: FastifyInstance) {
         wallets: unwrap(wallets),
         walletGroups: unwrap(walletGroups),
         domains: unwrap(domains),
+        domainGroups: unwrap(domainGroups),
         websites: unwrap(websites),
         websiteRequests: unwrap(requests),
         deposits: unwrap(deposits),
@@ -290,26 +376,127 @@ export async function registerRoutes(app: FastifyInstance) {
       return data;
     });
 
+    protectedApi.post("/api/domain-groups", async (request) => {
+      const values = z
+        .object({
+          name: z.string().trim().min(1),
+          color_label: colorLabel
+        })
+        .parse(request.body);
+      const data = unwrap(await db.from("domain_groups").insert(values).select("*").single());
+      await audit("domain_group.created", "domain_group", data.id, values);
+      return data;
+    });
+
+    protectedApi.put("/api/domain-groups/:id", async (request) => {
+      const { id } = z.object({ id: uuid }).parse(request.params);
+      const values = z
+        .object({
+          name: z.string().trim().min(1),
+          color_label: colorLabel
+        })
+        .parse(request.body);
+      const data = unwrap(await db.from("domain_groups").update(values).eq("id", id).select("*").single());
+      await audit("domain_group.updated", "domain_group", id, values);
+      return data;
+    });
+
     protectedApi.post("/api/domains/import", async (request) => {
-      const { domains } = z.object({ domains: z.string().min(1) }).parse(request.body);
-      const parsed = [...new Set(domains.split(/[,\n]/).map((value) => value.trim()).filter(Boolean).map(parseDomain))];
+      const values = z
+        .object({
+          domains: z.string().min(1),
+          domain_group_id: uuid.nullable().optional(),
+          new_group_name: z.string().trim().min(1).optional(),
+          new_group_color_label: colorLabel.optional(),
+          color_label: colorLabel
+        })
+        .parse(request.body);
+      if (values.domain_group_id && values.new_group_name) {
+        throw new Error("Choose an existing domain group or create a new group, not both");
+      }
+      const parsed = [...new Set(values.domains.split(/[,\n]/).map((value) => value.trim()).filter(Boolean).map(parseDomain))];
+      let domainGroupId = values.domain_group_id ?? null;
+      if (values.new_group_name) {
+        const group = unwrap(
+          await db
+            .from("domain_groups")
+            .insert({
+              name: values.new_group_name,
+              color_label: values.new_group_color_label ?? "#ff315f"
+            })
+            .select("*")
+            .single()
+        );
+        domainGroupId = group.id;
+        await audit("domain_group.created", "domain_group", group.id, {
+          name: group.name,
+          color_label: group.color_label
+        });
+      }
       const { error } = await db
         .from("domains")
-        .upsert(parsed.map((domain) => ({ domain })), {
+        .upsert(parsed.map((domain) => ({
+          domain,
+          domain_group_id: domainGroupId,
+          color_label: values.color_label
+        })), {
           onConflict: "domain",
           ignoreDuplicates: true
         });
       if (error) throw new Error(error.message);
-      await audit("domains.imported", "domains", undefined, { count: parsed.length });
+      await audit("domains.imported", "domains", undefined, {
+        count: parsed.length,
+        domain_group_id: domainGroupId
+      });
       return { imported: parsed.length };
     });
 
-    protectedApi.delete("/api/domains/:id", async (request) => {
+    protectedApi.put("/api/domains/:id", async (request) => {
       const { id } = z.object({ id: uuid }).parse(request.params);
+      const values = z
+        .object({
+          domain: z.string().optional(),
+          domain_group_id: uuid.nullable().optional(),
+          color_label: colorLabel.optional(),
+          status: z.enum(["pool", "archived"]).optional()
+        })
+        .parse(request.body);
+      const current = unwrap(await db.from("domains").select("status").eq("id", id).single());
+      if (current.status === "assigned" && values.status === "archived") {
+        throw new Error("Archive the assigned website before archiving its domain");
+      }
+      const update = {
+        ...values,
+        domain: values.domain ? parseDomain(values.domain) : undefined
+      };
+      const data = unwrap(
+        await db.from("domains").update(update).eq("id", id).select("*").single()
+      );
+      await audit("domain.updated", "domain", id, update);
+      return data;
+    });
+
+    protectedApi.post("/api/domains/:id/archive", async (request) => {
+      const { id } = z.object({ id: uuid }).parse(request.params);
+      const current = unwrap(await db.from("domains").select("status").eq("id", id).single());
+      if (current.status === "assigned") {
+        throw new Error("Archive the assigned website before archiving its domain");
+      }
       unwrap(
         await db.from("domains").update({ status: "archived" }).eq("id", id).select("id").single()
       );
       await audit("domain.archived", "domain", id);
+      return { ok: true };
+    });
+
+    protectedApi.delete("/api/domains/:id", async (request) => {
+      const { id } = z.object({ id: uuid }).parse(request.params);
+      const references = unwrap(await db.from("websites").select("id").eq("domain_id", id).limit(1));
+      if (references.length) {
+        throw new Error("Domains with website history cannot be deleted permanently. Archive this domain instead.");
+      }
+      unwrap(await db.from("domains").delete().eq("id", id).select("id").single());
+      await audit("domain.deleted", "domain", id);
       return { ok: true };
     });
 

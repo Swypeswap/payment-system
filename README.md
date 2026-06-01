@@ -12,6 +12,8 @@ The checked-in defaults do not move money:
 - Revenue-wallet private keys are encrypted with AES-256-GCM before they enter Supabase.
 - The encryption master key stays in the Ubuntu `.env` file and must never be stored in Supabase.
 - Revenue wallets can be grouped and color-labeled. CSV exports contain metadata only; per-wallet private-key downloads are password-confirmed, explicit audited actions.
+- Domains can be grouped, color-labeled, archived, restored, and permanently deleted when they have no website history.
+- Dashboard login attempts are rate-limited and security alerts can be delivered through the global `security_alert` Discord webhook route.
 - Incoming Helius events and submitted payouts are deduplicated.
 - Submitted payout transactions are stored and recovered after worker restarts.
 - Suspicious, unpriced, unroutable, or high-impact tokens are quarantined instead of swapped.
@@ -23,7 +25,7 @@ Custom vanity wallets work normally as long as they are valid on-curve Solana pu
 
 ## Components
 
-- `apps/server`: protected dashboard API, static dashboard, and authenticated Helius endpoint.
+- `apps/server`: protected dashboard API, static dashboard, authenticated Helius endpoint, and optional authenticated Supabase log-drain receiver.
 - `apps/worker`: Discord bot, Helius registration, periodic reconciliation, swaps, Privacy Cash shielding, delayed randomized withdrawals, and wallet-rotation recommendations.
 - `packages/shared`: encryption, wallet validation, constants, and payout-setting resolution.
 - `supabase/migrations`: Postgres schema, RLS lockdown, event claiming, and worker leases.
@@ -123,6 +125,18 @@ DASHBOARD_PASSWORD_HASH=
 
 Fill the remaining Supabase, Discord, Helius, Jupiter, domain, and RPC values from [`.env.example`](./.env.example).
 
+## Optional Security Monitoring
+
+1. In the dashboard, save a global `security_alert` Discord webhook route.
+2. Add an `IPINFO_TOKEN` to Ubuntu `.env` to enrich alerts with VPN and proxy detection. Without it, VPN status is reported as `Unknown`.
+3. Generate a separate random `SUPABASE_LOG_DRAIN_AUTH` value and add it to Ubuntu `.env`.
+4. If your Supabase plan supports Log Drains, create a generic HTTP log drain:
+   - Endpoint: `https://YOUR_DASHBOARD_DOMAIN/webhooks/supabase/logs`
+   - Header: `Authorization: Bearer YOUR_SUPABASE_LOG_DRAIN_AUTH`
+   - Gzip: disabled
+
+The receiver raises alerts for authentication failures, permission failures, and privileged database changes. Supabase API logs may include an IP address and user agent. Direct Postgres activity does not provide browser device details, so those fields are reported as unavailable when the drained event does not contain them. Enable and tune [Supabase pgAudit](https://supabase.com/docs/guides/database/extensions/pgaudit) separately if you need deeper database activity logging.
+
 For local development, install every package with:
 
 ```powershell
@@ -221,5 +235,8 @@ The worker intentionally installs dependencies with `--ignore-scripts`. Do not r
 - [Jupiter Tokens API](https://developers.jup.ag/docs/tokens)
 - [Solana RPC commitments](https://solana.com/docs/rpc)
 - [Supabase Row Level Security](https://supabase.com/docs/guides/database/postgres/row-level-security)
+- [Supabase Log Drains](https://supabase.com/docs/guides/telemetry/log-drains)
+- [Supabase pgAudit](https://supabase.com/docs/guides/database/extensions/pgaudit)
+- [IPinfo privacy detection](https://ipinfo.io/developers/privacy-detection-api)
 - [Privacy Cash backend SDK](https://privacycash.mintlify.app/sdk/overview)
 - [Privacy Cash privacy tips](https://privacycash.mintlify.app/documentation/user-docs/privacy-tips)
