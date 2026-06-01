@@ -129,7 +129,7 @@ Fill the remaining Supabase, Discord, Helius, Jupiter, domain, and RPC values fr
 ## Optional Security Monitoring
 
 1. In the dashboard, save a global `security_alert` Discord webhook route.
-2. Add an `IPINFO_TOKEN` from [IPinfo](https://ipinfo.io/account/token) to Ubuntu `.env` to enrich alerts with VPN and proxy detection. The `/privacy` endpoint requires a compatible IPinfo plan. Without it, VPN status is reported as `Unknown`.
+2. Add an `IPINFO_TOKEN` from [IPinfo](https://ipinfo.io/account/token) to Ubuntu `.env` to enrich alerts with VPN and proxy detection. IPinfo Plus provides VPN, proxy, Tor, and relay detail. IPinfo Core provides limited anonymous and hosting flags. Without a compatible token, the alert reports a safe HTTP diagnostic.
 3. Generate a separate random `SUPABASE_LOG_DRAIN_AUTH` value and add it to Ubuntu `.env`.
 4. If your Supabase plan supports Log Drains, create a generic HTTP log drain:
    - Endpoint: `https://YOUR_DASHBOARD_DOMAIN/webhooks/supabase/logs`

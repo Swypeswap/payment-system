@@ -6,12 +6,19 @@ import { env } from "./env.js";
 import { sendWebhook } from "./notifications.js";
 
 interface PrivacySignals {
-  vpn: boolean;
-  proxy: boolean;
-  tor: boolean;
-  relay: boolean;
-  hosting: boolean;
+  anonymous: boolean | null;
+  vpn: boolean | null;
+  proxy: boolean | null;
+  tor: boolean | null;
+  relay: boolean | null;
+  hosting: boolean | null;
   service: string;
+  source: string;
+}
+
+interface PrivacyLookup {
+  signals: PrivacySignals | null;
+  error: string;
 }
 
 interface SecurityContext {
@@ -28,7 +35,7 @@ interface SupabaseSignal {
   userAgent?: string;
 }
 
-const privacyCache = new Map<string, { expiresAt: number; signals: PrivacySignals | null }>();
+const privacyCache = new Map<string, { expiresAt: number; lookup: PrivacyLookup }>();
 const CACHE_MS = 60 * 60 * 1000;
 const LOCKDOWN_CACHE_MS = 1000;
 const NETWORK_BLOCK_MIN_SECONDS = 96 * 60 * 60;
@@ -74,58 +81,135 @@ function describeDevice(userAgent = ""): string {
   return `${kind} - ${os}`;
 }
 
-async function lookupPrivacy(ip: string): Promise<PrivacySignals | null> {
+function optionalBoolean(value: unknown): boolean | null {
+  return typeof value === "boolean" ? value : null;
+}
+
+function record(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+export function parseIpinfoLookupSignals(value: unknown): PrivacySignals | null {
+  const values = record(value);
+  if (!values) return null;
+  const anonymous = record(values.anonymous);
+  const hasCoreFlags =
+    typeof values.is_anonymous === "boolean" ||
+    typeof values.is_hosting === "boolean";
+  if (!anonymous && !hasCoreFlags) return null;
+
+  return {
+    anonymous: optionalBoolean(values.is_anonymous),
+    vpn: optionalBoolean(anonymous?.is_vpn),
+    proxy: optionalBoolean(anonymous?.is_proxy),
+    tor: optionalBoolean(anonymous?.is_tor),
+    relay: optionalBoolean(anonymous?.is_relay),
+    hosting: optionalBoolean(values.is_hosting),
+    service: typeof anonymous?.name === "string" ? anonymous.name : "",
+    source: anonymous ? "IPinfo Plus" : "IPinfo Core (limited)"
+  };
+}
+
+export function parseIpinfoPrivacySignals(value: unknown): PrivacySignals | null {
+  const values = record(value);
+  if (!values) return null;
+  const knownFields = ["vpn", "proxy", "tor", "relay", "hosting"];
+  if (!knownFields.some((field) => typeof values[field] === "boolean")) return null;
+
+  const vpn = optionalBoolean(values.vpn);
+  const proxy = optionalBoolean(values.proxy);
+  const tor = optionalBoolean(values.tor);
+  const relay = optionalBoolean(values.relay);
+  return {
+    anonymous: [vpn, proxy, tor, relay].some((signal) => signal === true),
+    vpn,
+    proxy,
+    tor,
+    relay,
+    hosting: optionalBoolean(values.hosting),
+    service: typeof values.service === "string" ? values.service : "",
+    source: "IPinfo Privacy Detection"
+  };
+}
+
+async function fetchIpinfo(url: string) {
+  const response = await fetch(url, {
+    headers: { authorization: `Bearer ${env.IPINFO_TOKEN}` },
+    signal: AbortSignal.timeout(2500)
+  });
+  if (!response.ok) {
+    return { value: null, error: `HTTP ${response.status}` };
+  }
+  return { value: await response.json(), error: "" };
+}
+
+async function lookupPrivacy(ip: string): Promise<PrivacyLookup> {
   if (!env.IPINFO_TOKEN || !isIP(ip) || isPrivateIp(ip)) {
-    return null;
+    return { signals: null, error: "" };
   }
   const cached = privacyCache.get(ip);
   if (cached && cached.expiresAt > Date.now()) {
-    return cached.signals;
+    return cached.lookup;
   }
 
   try {
-    const host = ip.includes(":") ? "v6.ipinfo.io" : "ipinfo.io";
-    const response = await fetch(`https://${host}/${encodeURIComponent(ip)}/privacy`, {
-      headers: { authorization: `Bearer ${env.IPINFO_TOKEN}` },
-      signal: AbortSignal.timeout(2500)
-    });
-    if (!response.ok) {
-      throw new Error(`IPinfo returned HTTP ${response.status}`);
+    const lookup = await fetchIpinfo(`https://api.ipinfo.io/lookup/${encodeURIComponent(ip)}`);
+    const lookupSignals = parseIpinfoLookupSignals(lookup.value);
+    if (lookupSignals) {
+      const result = { signals: lookupSignals, error: "" };
+      privacyCache.set(ip, { expiresAt: Date.now() + CACHE_MS, lookup: result });
+      return result;
     }
-    const values = (await response.json()) as Partial<PrivacySignals>;
-    const signals = {
-      vpn: values.vpn === true,
-      proxy: values.proxy === true,
-      tor: values.tor === true,
-      relay: values.relay === true,
-      hosting: values.hosting === true,
-      service: typeof values.service === "string" ? values.service : ""
+
+    const host = ip.includes(":") ? "v6.ipinfo.io" : "ipinfo.io";
+    const privacy = await fetchIpinfo(`https://${host}/${encodeURIComponent(ip)}/privacy`);
+    const privacySignals = parseIpinfoPrivacySignals(privacy.value);
+    if (privacySignals) {
+      const result = { signals: privacySignals, error: "" };
+      privacyCache.set(ip, { expiresAt: Date.now() + CACHE_MS, lookup: result });
+      return result;
+    }
+
+    const result = {
+      signals: null,
+      error: `lookup ${lookup.error || "did not include privacy flags"}; privacy fallback ${privacy.error || "did not include privacy flags"}`
     };
-    privacyCache.set(ip, { expiresAt: Date.now() + CACHE_MS, signals });
-    return signals;
-  } catch {
-    privacyCache.set(ip, { expiresAt: Date.now() + 5 * 60 * 1000, signals: null });
-    return null;
+    privacyCache.set(ip, { expiresAt: Date.now() + 5 * 60 * 1000, lookup: result });
+    return result;
+  } catch (error) {
+    const result = {
+      signals: null,
+      error: error instanceof Error ? error.message : "IPinfo request failed"
+    };
+    privacyCache.set(ip, { expiresAt: Date.now() + 5 * 60 * 1000, lookup: result });
+    return result;
   }
 }
 
 async function contextFor(ip: string, userAgent?: string): Promise<SecurityContext> {
-  const signals = await lookupPrivacy(ip);
-  const privacySignals = signals
+  const lookup = await lookupPrivacy(ip);
+  const { signals } = lookup;
+  const detectedSignals = signals
     ? [
-        signals.proxy ? "Proxy" : "",
-        signals.tor ? "Tor" : "",
-        signals.relay ? "Relay" : "",
-        signals.hosting ? "Hosting" : "",
+        signals.anonymous === true ? "Anonymous" : "",
+        signals.proxy === true ? "Proxy" : "",
+        signals.tor === true ? "Tor" : "",
+        signals.relay === true ? "Relay" : "",
+        signals.hosting === true ? "Hosting" : "",
         signals.service
-      ].filter(Boolean).join(", ") || "None detected"
+      ].filter(Boolean)
+    : [];
+  const privacySignals = signals
+    ? `${signals.source}; ${detectedSignals.join(", ") || "None detected"}`
     : env.IPINFO_TOKEN
-      ? "Unavailable"
+      ? `Unavailable - ${lookup.error || "IPinfo lookup could not be completed"}`
       : "Unknown - IPINFO_TOKEN is not configured";
   return {
     ip,
     device: describeDevice(userAgent),
-    vpn: signals ? (signals.vpn ? "Yes" : "No") : "Unknown",
+    vpn: signals?.vpn === true ? "Yes" : signals?.vpn === false ? "No" : "Unknown",
     privacySignals
   };
 }
