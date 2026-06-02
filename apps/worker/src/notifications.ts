@@ -14,6 +14,13 @@ export function setDiscordClient(client: Client) {
   discordClient = client;
 }
 
+function contentWithEveryone(payload: Record<string, unknown>, mentionEveryone: boolean): string | undefined {
+  const content = typeof payload.content === "string" ? payload.content : "";
+  if (!mentionEveryone) return content || undefined;
+  if (content.includes("@everyone")) return content;
+  return content ? `@everyone\n${content}` : "@everyone";
+}
+
 async function getRoute(kind: NotificationKind, teamId?: string) {
   if (teamId) {
     const teamRoute = await db
@@ -53,14 +60,16 @@ export async function sendRoute(
     },
     env.MASTER_ENCRYPTION_KEY
   );
+  const mentionEveryone = Boolean(row.mention_everyone);
   const response = await fetch(url, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
       ...payload,
+      content: contentWithEveryone(payload, mentionEveryone),
       username: CONFETTI_WEBHOOK_NAMES[kind],
       avatar_url: CONFETTI_WEBHOOK_AVATAR_URL,
-      allowed_mentions: { parse: row.mention_everyone ? ["everyone"] : [] }
+      allowed_mentions: { parse: mentionEveryone ? ["everyone"] : [] }
     })
   });
   if (!response.ok) throw new Error(`Discord webhook failed with HTTP ${response.status}`);
