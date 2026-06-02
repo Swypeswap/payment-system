@@ -7,6 +7,7 @@ import {
   decryptSecret,
   encryptSecret,
   parseSecretKey,
+  secretKeyToBase58,
   parseDomain,
   toHttpsWebsiteUrl,
   validateSolanaWalletAddress
@@ -623,10 +624,8 @@ export async function registerRoutes(app: FastifyInstance) {
         throw new Error("An active company wallet already exists");
       }
       const keypair = Keypair.generate();
-      const encrypted = encryptSecret(
-        JSON.stringify(Array.from(keypair.secretKey)),
-        env.MASTER_ENCRYPTION_KEY
-      );
+      const privateKey = secretKeyToBase58(JSON.stringify(Array.from(keypair.secretKey)));
+      const encrypted = encryptSecret(privateKey, env.MASTER_ENCRYPTION_KEY);
       const data = unwrap(
         await db
           .from("company_wallets")
@@ -673,11 +672,74 @@ export async function registerRoutes(app: FastifyInstance) {
           },
           env.MASTER_ENCRYPTION_KEY
         );
+        const parsed = parseSecretKey(privateKey);
+        if (parsed.publicKey.toBase58() !== wallet.address) {
+          throw new Error("Stored company private key does not match this wallet address");
+        }
         await audit("company_wallet.private_key_revealed", "company_wallet", id, {
           address: wallet.address,
           status: wallet.status
         });
-        return { address: wallet.address, private_key: privateKey };
+        return { address: wallet.address, private_key: secretKeyToBase58(privateKey) };
+      }
+    );
+
+    protectedApi.post(
+      "/api/company-wallets/:id/rotate",
+      { config: { rateLimit: { max: 3, timeWindow: "1 minute" } } },
+      async (request) => {
+        const { id } = z.object({ id: uuid }).parse(request.params);
+        const { password } = z.object({ password: z.string().min(1) }).parse(request.body);
+        if (!(await bcrypt.compare(password, env.DASHBOARD_PASSWORD_HASH))) {
+          throw new Error("Invalid dashboard password");
+        }
+        const oldWallet = unwrap(
+          await db
+            .from("company_wallets")
+            .select("id,address,status")
+            .eq("id", id)
+            .single()
+        );
+        if (oldWallet.status !== "active") {
+          throw new Error("Only the active company wallet can be rotated");
+        }
+        const keypair = Keypair.generate();
+        const privateKey = secretKeyToBase58(JSON.stringify(Array.from(keypair.secretKey)));
+        const encrypted = encryptSecret(privateKey, env.MASTER_ENCRYPTION_KEY);
+        const newWallet = unwrap(
+          await db.rpc("rotate_company_wallet", {
+            requested_old_wallet_id: oldWallet.id,
+            generated_address: keypair.publicKey.toBase58(),
+            generated_encrypted_private_key: encrypted.ciphertext,
+            generated_encryption_nonce: encrypted.nonce,
+            generated_encryption_auth_tag: encrypted.authTag,
+            generated_encryption_key_version: encrypted.keyVersion
+          })
+        );
+        await audit("company_wallet.rotated_dashboard", "company_wallet", newWallet.id, {
+          old_wallet_id: oldWallet.id,
+          old_wallet_address: oldWallet.address,
+          new_wallet_address: newWallet.address
+        });
+        void sendWebhook("company_wallet_rotated", {
+          embeds: [{
+            title: "Company wallet rotated from dashboard",
+            color: 0x64f5b5,
+            fields: [
+              { name: "Old wallet", value: oldWallet.address },
+              { name: "New wallet", value: newWallet.address },
+              { name: "Private key", value: "Stored encrypted in dashboard. Never sent through Discord." }
+            ]
+          }]
+        }).catch((error) => {
+          request.log.warn({ error }, "Could not send company rotation webhook");
+        });
+        return {
+          id: newWallet.id,
+          address: newWallet.address,
+          status: newWallet.status,
+          activated_at: newWallet.activated_at
+        };
       }
     );
 

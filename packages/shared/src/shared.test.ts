@@ -12,6 +12,7 @@ import {
   grossUpPrivacyCashWithdrawal,
   parseDomain,
   parseSecretKey,
+  secretKeyToBase58,
   planPrivacyCashDistribution,
   planOwnerPrivacyCashDistribution,
   privacyCashNetFromGross,
@@ -52,6 +53,13 @@ test("parses a JSON Solana private key and accepts its wallet address", () => {
     validateSolanaWalletAddress(keypair.publicKey.toBase58()),
     keypair.publicKey.toBase58()
   );
+});
+
+test("normalizes JSON Solana private keys to base58", () => {
+  const keypair = Keypair.generate();
+  const base58 = secretKeyToBase58(JSON.stringify(Array.from(keypair.secretKey)));
+  const parsed = parseSecretKey(base58);
+  assert.equal(parsed.publicKey.toBase58(), keypair.publicKey.toBase58());
 });
 
 test("resolves website overrides and validates percentages", () => {

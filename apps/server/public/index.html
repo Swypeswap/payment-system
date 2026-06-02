@@ -138,12 +138,13 @@
     </dialog>
 
     <dialog id="company-key-dialog">
-      <form class="modal-card" method="dialog">
+      <form class="modal-card company-key-card" method="dialog">
         <p class="eyebrow">COMPANY WALLET</p>
         <h2>Private key revealed</h2>
         <p>This key belongs to <strong id="company-key-address"></strong>. It is never sent through Discord or webhooks.</p>
-        <label>Private key<textarea name="company_private_key" readonly></textarea></label>
+        <label>Base58 private key<textarea name="company_private_key" class="key-output" readonly spellcheck="false"></textarea></label>
         <div class="modal-actions">
+          <button type="button" id="company-key-copy">Copy private key</button>
           <button type="button" class="ghost" id="company-key-close">Close</button>
         </div>
       </form>
@@ -159,6 +160,20 @@
         <div class="modal-actions">
           <button type="button" class="ghost" id="company-key-auth-cancel">Cancel</button>
           <button type="submit" class="danger-action">Reveal key</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="company-rotate-auth-dialog">
+      <form id="company-rotate-auth-form" class="modal-card">
+        <p class="eyebrow">COMPANY WALLET</p>
+        <h2>Rotate company wallet</h2>
+        <p>This archives the current active company wallet and creates a new active wallet. The old wallet stays monitored until it is empty and cleared.</p>
+        <input type="hidden" name="company_wallet_id" />
+        <label>Dashboard password<input name="dashboard_access_secret" type="password" autocomplete="new-password" autocapitalize="off" spellcheck="false" data-1p-ignore data-lpignore="true" required /></label>
+        <div class="modal-actions">
+          <button type="button" class="ghost" id="company-rotate-auth-cancel">Cancel</button>
+          <button type="submit" class="danger-action">Rotate wallet</button>
         </div>
       </form>
     </dialog>

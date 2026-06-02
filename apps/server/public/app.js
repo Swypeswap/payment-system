@@ -522,7 +522,10 @@ function company() {
         <span class="chip good">Active</span>
         <span class="chip">Received volume: ${money(company.received_volume_usd)}</span>
         <span class="chip">Balance: ${lamportsToSol(company.current_sol_lamports)}</span>
-        <div class="actions"><button class="ghost" data-reveal-company-key="${company.id}">Reveal private key</button></div>
+        <div class="actions">
+          <button class="ghost" data-reveal-company-key="${company.id}">Reveal private key</button>
+          <button class="ghost danger" data-rotate-company-wallet="${company.id}">Rotate wallet</button>
+        </div>
         <small>Requires dashboard password re-entry. This key is never sent through Discord.</small>
       </div>` : `<div class="stack"><p>No active company wallet exists yet.</p><button data-generate-company-wallet>Generate initial company wallet</button></div>`}
     </article>
@@ -718,6 +721,13 @@ function openCompanyKeyAuthDialog(companyWalletId) {
   dialog.showModal();
 }
 
+function openCompanyRotateAuthDialog(companyWalletId) {
+  const dialog = $("#company-rotate-auth-dialog");
+  dialog.querySelector("[name=company_wallet_id]").value = companyWalletId;
+  dialog.querySelector("[name=dashboard_access_secret]").value = "";
+  dialog.showModal();
+}
+
 function openDomainEditDialog(domainId) {
   const domain = state.domains.find((item) => item.id === domainId);
   const dialog = $("#domain-edit-dialog");
@@ -886,6 +896,21 @@ document.addEventListener("submit", async (event) => {
       clearPasswordInputs();
     }
   }
+  if (event.target.id === "company-rotate-auth-form") {
+    try {
+      const result = await api(`/api/company-wallets/${values.company_wallet_id}/rotate`, {
+        method: "POST",
+        body: JSON.stringify({ password: values.dashboard_access_secret })
+      });
+      $("#company-rotate-auth-dialog").close();
+      notice(`Company wallet rotated. New active wallet: ${result.address}`);
+      await load();
+    } catch (error) {
+      notice(error.message, "error");
+    } finally {
+      clearPasswordInputs();
+    }
+  }
   if (event.target.id === "route-form") mutate("/api/notification-routes", "POST", {
     ...values,
     team_id: null,
@@ -935,8 +960,20 @@ document.addEventListener("click", async (event) => {
   if (button.dataset.revealCompanyKey) {
     openCompanyKeyAuthDialog(button.dataset.revealCompanyKey);
   }
+  if (button.dataset.rotateCompanyWallet) {
+    openCompanyRotateAuthDialog(button.dataset.rotateCompanyWallet);
+  }
   if (button.id === "company-key-auth-cancel") { $("#company-key-auth-dialog").close(); clearPasswordInputs(); }
-  if (button.id === "company-key-close") $("#company-key-dialog").close();
+  if (button.id === "company-rotate-auth-cancel") { $("#company-rotate-auth-dialog").close(); clearPasswordInputs(); }
+  if (button.id === "company-key-copy") {
+    const value = $("#company-key-dialog").querySelector("[name=company_private_key]").value;
+    await navigator.clipboard.writeText(value);
+    notice("Company private key copied.");
+  }
+  if (button.id === "company-key-close") {
+    $("#company-key-dialog").querySelector("[name=company_private_key]").value = "";
+    $("#company-key-dialog").close();
+  }
   if (button.dataset.archiveDomain && confirm("Archive this domain?")) mutate(`/api/domains/${button.dataset.archiveDomain}/archive`, "POST");
   if (button.dataset.restoreDomain && confirm("Restore this domain to the active list?")) mutate(`/api/domains/${button.dataset.restoreDomain}`, "PUT", { status: "pool" });
   if (button.dataset.deleteDomain && confirm("Permanently delete this domain? Domains with website history must be archived instead.")) mutate(`/api/domains/${button.dataset.deleteDomain}`, "DELETE");

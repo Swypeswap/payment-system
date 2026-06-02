@@ -108,3 +108,7 @@ export function parseSecretKey(input: string): Keypair {
   }
   throw new Error("Private key must decode to a 32-byte seed or 64-byte secret key");
 }
+
+export function secretKeyToBase58(input: string): string {
+  return bs58.encode(parseSecretKey(input).secretKey);
+}
