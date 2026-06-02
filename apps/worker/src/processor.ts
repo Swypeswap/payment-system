@@ -40,6 +40,7 @@ import {
   type PrivacyCashAsset,
   withPrivacyCashLease
 } from "./privacy-cash.js";
+import { processSourceChainEvent } from "./source-processor.js";
 
 const connection = new Connection(env.SOLANA_RPC_URL, "confirmed");
 const TOKEN_PROGRAM_ID = new PublicKey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA");
@@ -1130,6 +1131,7 @@ async function recordDeposit(
 }
 
 async function processChainEvent(event: { id: string; payload: Record<string, unknown> }) {
+  await processSourceChainEvent(event);
   const signature = getEventSignature(event.payload);
   if (!signature || await isInternalSignature(signature)) return;
   const websites = unwrap(

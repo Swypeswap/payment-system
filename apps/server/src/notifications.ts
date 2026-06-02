@@ -13,6 +13,7 @@ interface RouteRow {
   encryption_nonce: string;
   encryption_auth_tag: string;
   encryption_key_version: number;
+  mention_everyone?: boolean;
 }
 
 export function encryptWebhookUrl(url: string) {
@@ -32,7 +33,7 @@ async function getRoute(kind: NotificationKind, teamId?: string): Promise<RouteR
   if (teamId) {
     const teamResult = await db
       .from("notification_routes")
-      .select("encrypted_webhook_url,encryption_nonce,encryption_auth_tag,encryption_key_version")
+      .select("encrypted_webhook_url,encryption_nonce,encryption_auth_tag,encryption_key_version,mention_everyone")
       .eq("kind", kind)
       .eq("team_id", teamId)
       .eq("enabled", true)
@@ -47,7 +48,7 @@ async function getRoute(kind: NotificationKind, teamId?: string): Promise<RouteR
 
   const globalResult = await db
     .from("notification_routes")
-    .select("encrypted_webhook_url,encryption_nonce,encryption_auth_tag,encryption_key_version")
+    .select("encrypted_webhook_url,encryption_nonce,encryption_auth_tag,encryption_key_version,mention_everyone")
     .eq("kind", kind)
     .is("team_id", null)
     .eq("enabled", true)
@@ -88,7 +89,7 @@ export async function sendWebhook(
       username: CONFETTI_WEBHOOK_NAMES[kind],
       avatar_url: CONFETTI_WEBHOOK_AVATAR_URL,
       allowed_mentions: {
-        parse: options.mentionEveryone ? ["everyone"] : []
+        parse: options.mentionEveryone || row.mention_everyone ? ["everyone"] : []
       }
     })
   });
@@ -102,7 +103,7 @@ export async function listRedactedRoutes() {
   return unwrap(
     await db
       .from("notification_routes")
-      .select("id,kind,team_id,name,enabled,updated_at")
+      .select("id,kind,team_id,name,enabled,mention_everyone,updated_at")
       .order("kind")
   );
 }

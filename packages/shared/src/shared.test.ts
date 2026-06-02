@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
+import { createCipheriv } from "node:crypto";
 import test from "node:test";
 import { Keypair } from "@solana/web3.js";
 import {
   decryptSecret,
+  decryptVersionedSourceSecret,
   CONFETTI_WEBHOOK_AVATAR_URL,
   CONFETTI_WEBHOOK_NAMES,
   effectiveWebsiteSettings,
@@ -11,6 +13,7 @@ import {
   parseDomain,
   parseSecretKey,
   planPrivacyCashDistribution,
+  planOwnerPrivacyCashDistribution,
   privacyCashNetFromGross,
   toHttpsWebsiteUrl,
   validateSolanaWalletAddress
@@ -21,6 +24,24 @@ test("encrypts and decrypts secrets with AES-256-GCM", () => {
   const encrypted = encryptSecret("secret-value", key);
   assert.notEqual(encrypted.ciphertext, "secret-value");
   assert.equal(decryptSecret(encrypted, key), "secret-value");
+});
+
+test("decrypts Telegram source-wallet v1 AES-GCM blobs", () => {
+  const key = Buffer.alloc(32, 9);
+  const nonce = Buffer.alloc(12, 4);
+  const cipher = createCipheriv("aes-256-gcm", key, nonce);
+  const ciphertext = Buffer.concat([
+    cipher.update("base58-private-key", "utf8"),
+    cipher.final(),
+    cipher.getAuthTag()
+  ]);
+  assert.equal(
+    decryptVersionedSourceSecret(
+      `v1:${nonce.toString("base64")}:${ciphertext.toString("base64")}`,
+      key.toString("base64")
+    ),
+    "base58-private-key"
+  );
 });
 
 test("parses a JSON Solana private key and accepts its wallet address", () => {
@@ -98,6 +119,22 @@ test("splits each Privacy Cash entitlement into weighted legs without changing i
   assert.equal(sum("owner_2"), sum("manager") * 3n);
   assert.equal(sum("owner_3"), sum("manager") * 3n);
   assert.equal(plan.withdrawals.length, 9);
+});
+
+test("plans exact 33/33/34 owner-only Privacy Cash payouts with randomized legs", () => {
+  const fees = { withdrawFeeRate: 0.0035, withdrawBaseFeeLamports: 6_000_000 };
+  const plan = planOwnerPrivacyCashDistribution(
+    2_000_000_000n,
+    fees,
+    [[8, 12], [10, 9, 11], [11, 9]]
+  );
+  const sum = (kind: string) =>
+    plan.withdrawals
+      .filter((item) => item.recipientKind === kind)
+      .reduce((total, item) => total + item.netLamports, 0n);
+  assert.equal(sum("owner_1"), sum("owner_2"));
+  assert.equal(sum("owner_3") * 33n, sum("owner_1") * 34n);
+  assert.equal(plan.withdrawals.length, 7);
 });
 
 test("uses the configured Confetti identity for Discord webhook messages", () => {

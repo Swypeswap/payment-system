@@ -1,6 +1,13 @@
-# Solana Team Payout Platform
+# Confetti Revenue Control
 
-A protected dashboard, Discord bot, and payout worker for website-specific Solana revenue wallets.
+A protected dashboard, Discord bot, and payout worker for Telegram-managed website revenue wallets.
+
+The current payout flow is:
+
+1. The in-house Telegram system creates and owns each website record.
+2. This platform mirrors Telegram `sites`, `performers`, and `approved_performers` through a read-only Postgres role.
+3. When a mirrored revenue wallet receives SOL, USDC, or SPL tokens, the worker sells safe SPL/USDC balances to SOL and immediately splits native SOL between the performer and company wallet using the latest approved commission percent.
+4. When the active company wallet reaches the configured USD threshold, it deposits to Privacy Cash and releases randomized delayed owner payouts as 33/33/34.
 
 ## Safety Defaults
 
@@ -9,9 +16,12 @@ The checked-in defaults do not move money:
 - `DRY_RUN=true` is an Ubuntu-level kill switch.
 - The database starts with `emergency_paused=true`.
 - SPL swaps and live payouts start disabled.
-- Revenue-wallet private keys are encrypted with AES-256-GCM before they enter Supabase.
+- Telegram source sync starts disabled in the dashboard.
+- Telegram source database access uses a read-only role. The dashboard server does not receive the source database URL or the source wallet decryption key.
+- Mirrored revenue-wallet private keys are stored encrypted for the worker only. They are never displayed or exportable from the dashboard.
+- Company-wallet private keys are encrypted with AES-256-GCM. Dashboard reveal requires password re-entry, is rate-limited, and is audited. Company keys are never sent through Discord.
 - The encryption master key stays in the Ubuntu `.env` file and must never be stored in Supabase.
-- Revenue wallets can be grouped and color-labeled. CSV exports contain metadata only; per-wallet private-key downloads are password-confirmed, explicit audited actions.
+- Legacy local revenue wallets can still be grouped and color-labeled. CSV exports contain metadata only; per-wallet private-key downloads are password-confirmed, explicit audited actions.
 - Domains can be grouped, color-labeled, archived, restored, and permanently deleted when they have no website history.
 - Archived website assignments retain their audit history. Return an archived domain to the pool before linking it again; only one active website can use a domain or revenue wallet at a time.
 - Dashboard login attempts are rate-limited. Two failed passwords within 15 minutes block the public IPv4 address or IPv6 `/64` network for a randomized 96-hour to five-week period, and security alerts can be delivered through the global `security_alert` Discord webhook route.
@@ -22,15 +32,16 @@ The checked-in defaults do not move money:
 - Submitted payout transactions are stored and recovered after worker restarts.
 - Suspicious, unpriced, unroutable, or high-impact tokens are quarantined instead of swapped.
 - Privacy Cash starts disabled and only runs on Solana mainnet after every kill switch allows it.
-- Every guarded SPL conversion, including USDC, settles to native SOL before Privacy Cash shielding.
-- SOL payouts are split into delayed randomized legs. Interrupted private withdrawals require manual review and are never retried blindly.
+- Every guarded SPL conversion, including USDC, settles to native SOL before performer/company splitting.
+- Company funds only enter Privacy Cash after the company wallet threshold is reached. Owner payouts are split into delayed randomized SOL legs. Interrupted private withdrawals require manual review and are never retried blindly.
+- Retired mirrored revenue-wallet keys can be erased only after the wallet is empty for three continuous days and one owner confirms the one-time Discord action. Public address tombstones remain monitored.
 
 Custom vanity wallets work normally as long as they are valid on-curve Solana public keys.
 
 ## Components
 
 - `apps/server`: protected dashboard API, static dashboard, authenticated Helius endpoint, and optional authenticated Supabase log-drain receiver.
-- `apps/worker`: Discord bot, Helius registration, periodic reconciliation, swaps, Privacy Cash shielding, delayed randomized withdrawals, and wallet-rotation recommendations.
+- `apps/worker`: Discord bot, Helius registration, read-only Telegram source sync, revenue-wallet swaps/splits, company-wallet reconciliation, Privacy Cash shielding, delayed randomized withdrawals, and wallet-rotation actions.
 - `packages/shared`: encryption, wallet validation, constants, and payout-setting resolution.
 - `supabase/migrations`: Postgres schema, RLS lockdown, event claiming, and worker leases.
 
@@ -47,7 +58,69 @@ Custom vanity wallets work normally as long as they are valid on-curve Solana pu
 
 RLS is enabled and browser roles are revoked. Only the backend services use the service-role key.
 
-## 2. Create Discord App
+## 2. Connect The Telegram Source Database
+
+The Telegram Supabase project is a separate source of truth. This platform must only read it.
+
+Create a read-only Postgres role in the Telegram Supabase SQL editor and grant only the columns needed by the worker:
+
+```sql
+create role payment_sync_reader with
+  login
+  password 'REPLACE_WITH_A_LONG_RANDOM_PASSWORD'
+  nosuperuser
+  nocreatedb
+  nocreaterole
+  noinherit
+  noreplication
+  nobypassrls
+  connection limit 2;
+
+grant connect on database postgres to payment_sync_reader;
+grant usage on schema public to payment_sync_reader;
+
+grant select (
+  id,
+  domain,
+  intermediate_wallet,
+  created_at,
+  updated_at,
+  status,
+  performer_id,
+  is_promo_site,
+  wallet_auto_generated,
+  intermediate_private_key_encrypted,
+  intermediate_key_encrypted_at
+) on public.sites to payment_sync_reader;
+
+grant select (
+  telegram_user_id,
+  telegram_username,
+  payout_wallet,
+  created_at,
+  updated_at
+) on public.performers to payment_sync_reader;
+
+grant select (
+  telegram_user_id,
+  telegram_username,
+  commission_pct,
+  approved_at
+) on public.approved_performers to payment_sync_reader;
+```
+
+Put the read-only pooler URL in Ubuntu `.env` as `SOURCE_DATABASE_URL`. Use the source wallet decryption key from the Telegram system as `SOURCE_INTERMEDIATE_WALLET_ENCRYPTION_KEY`.
+
+```dotenv
+SOURCE_DATABASE_URL=postgresql://payment_sync_reader.PROJECT_REF:PASSWORD@aws-1-eu-central-1.pooler.supabase.com:5432/postgres?sslmode=require
+SOURCE_INTERMEDIATE_WALLET_ENCRYPTION_KEY=
+SOURCE_DATABASE_SSL_REJECT_UNAUTHORIZED=false
+SOURCE_SYNC_INTERVAL_MS=15000
+```
+
+`docker-compose.yml` intentionally clears these two source values for the `server` container. Only the worker receives them.
+
+## 3. Create Discord App
 
 1. Create an application in the [Discord Developer Portal](https://discord.com/developers/applications).
 2. Add a bot and record its token as `DISCORD_BOT_TOKEN`.
@@ -65,7 +138,7 @@ RLS is enabled and browser roles are revoked. Only the backend services use the 
 
 The bot also verifies roles and manager-to-team assignments server-side. In the owners server, `/owner-wallet-update`, `/approve-manager-wallet`, and `/reject-manager-wallet` are registered separately. Only owner profiles linked by immutable Discord user ID can use them.
 
-## 3. Create Helius And Jupiter Keys
+## 4. Create Helius And Jupiter Keys
 
 1. Create a Helius account and API key in the [Helius dashboard](https://dashboard.helius.dev/).
 2. Put the key in `HELIUS_API_KEY`.
@@ -75,7 +148,7 @@ The bot also verifies roles and manager-to-team assignments server-side. In the 
 
 The worker creates or updates one authenticated Helius webhook for all hosted website revenue wallets. Helius can start on its free plan. Jupiter also offers a free tier. Confirm current pricing and limits before production traffic.
 
-## 4. Prepare Ubuntu
+## 5. Prepare Ubuntu
 
 Use Ubuntu 24.04 LTS or newer.
 
@@ -106,7 +179,7 @@ cp .env.example .env
 
 Allow inbound SSH from your IP and inbound TCP ports `80` and `443` from the internet. Do not expose port `3000`. Point a DNS `A` record such as `payouts.example.com` to the Ubuntu server. Caddy will obtain the TLS certificate automatically.
 
-## 5. Generate Secrets On PowerShell
+## 6. Generate Secrets On PowerShell
 
 On your trusted Windows workstation:
 
@@ -155,7 +228,7 @@ For local development, install every package with:
 npm run install:all
 ```
 
-## 6. Start In Devnet Dry-Run Mode
+## 7. Start In Devnet Dry-Run Mode
 
 Keep these values:
 
@@ -175,43 +248,41 @@ Open `https://YOUR_DASHBOARD_DOMAIN` and sign in with the generated password.
 
 In the dashboard:
 
-1. Add global Discord webhook routes.
-2. Add manager Discord IDs.
-3. Add exactly three owner profiles with Discord IDs. Add teams, assign managers, and configure each team channel and payout message.
-4. Import devnet revenue-wallet private keys.
-5. Bulk-import domains.
-6. Assign a domain, team, revenue wallet, and optional website overrides.
-7. Toggle **Hosted** for the website.
-8. Keep the emergency pause enabled initially.
+1. Add each Discord webhook route separately. Deposit, swap, split, company threshold, Privacy Cash, wallet lifecycle, security, and worker-error notifications can all use different webhooks and independent `@everyone` settings.
+2. Add exactly three active owner profiles with Discord IDs and Solana wallets.
+3. Set the owners Discord server and notification channel.
+4. Open **Company** and generate the initial company wallet. Reveal/copy the private key only after password re-entry, then store it securely offline.
+5. Confirm `SOURCE_DATABASE_URL` and `SOURCE_INTERMEDIATE_WALLET_ENCRYPTION_KEY` are present only for the worker.
+6. Keep **External Telegram sync**, **Guarded SPL and USDC swaps**, **Company Privacy Cash**, **Live payouts**, and **Emergency pause** in the safe state until you finish the checks below.
 
 The top-right `PAUSED` badge means **Emergency pause** is enabled. To leave the safe default, open **Settings**, uncheck **Emergency pause**, and save. The badge changes to `DRY RUN` or `LIVE` depending on the other payout switches and Ubuntu `DRY_RUN`.
 
-## 7. Verify Before Mainnet
+## 8. Verify Before Mainnet
 
 Complete this checklist on devnet:
 
-1. `/request-website` sends the expected request notification.
-2. A regular member cannot run either command.
-3. A manager can update only an assigned team's wallet.
-4. Invalid and off-curve wallet values are rejected.
-5. Toggling **Hosted** sends an `@everyone` activation message.
-6. A devnet SOL deposit appears in the dashboard and Discord.
-7. Dry-run Privacy Cash shield batches and randomized SOL payout legs appear above the configured USD threshold.
-8. Restarting `worker` does not duplicate a deposit or payout.
-9. The emergency pause prevents swaps and payouts.
-10. A notification-route test succeeds from the dashboard.
+1. `docker compose exec worker npm run register:discord` registers owner commands and lifecycle buttons.
+2. The dashboard shows the mirrored Telegram source rows after **External Telegram sync** is enabled.
+3. The mirrored revenue wallet count matches the Telegram `sites` table rows that have a wallet and encrypted key.
+4. A test deposit creates a separate deposit notification.
+5. A safe SPL or USDC balance creates a separate swap notification and settles to SOL.
+6. The performer/company split notification uses the latest `approved_performers.commission_pct` and `performers.payout_wallet`.
+7. If a performer is missing approval, commission, or wallet, processing stops and creates a review-required notification.
+8. When the company threshold is reached, a company Privacy Cash shield job and randomized owner withdrawal legs are created in dry-run mode.
+9. Restarting `worker` does not duplicate deposits, swaps, splits, lifecycle requests, or payout legs.
+10. Emergency pause prevents swaps, splits, and Privacy Cash movement.
 
 Privacy Cash does not offer devnet support. Devnet verifies application logic only. Protocol integration must use a tightly capped mainnet canary.
 
-## 8. Enable Mainnet Carefully
+## 9. Enable Mainnet Carefully
 
 1. Change `SOLANA_CLUSTER=mainnet-beta`.
 2. Use a production Helius RPC URL.
-3. Recreate the hosted website assignments with mainnet revenue wallets.
-4. Start with a low-value website and keep `DRY_RUN=true`.
-5. Confirm deposit detection and dry-run payout calculations.
-6. Add three linked owner profiles and set the owners Discord channel. Register both guilds with `docker compose exec worker npm run register:discord`.
-7. In the dashboard, disable **Emergency pause**, then enable **Guarded SPL swaps**, **Privacy Cash**, and **Live payouts**.
+3. Confirm the Telegram source DB contains the real mainnet revenue-wallet rows.
+4. Start with a low-value site and keep `DRY_RUN=true`.
+5. Confirm deposit detection, guarded swap decisions, performer/company split calculation, and dry-run company Privacy Cash planning.
+6. Register both Discord guilds with `docker compose exec worker npm run register:discord`.
+7. In the dashboard, enable **External Telegram sync**, disable **Emergency pause**, then enable **Guarded SPL and USDC swaps**, **Company Privacy Cash**, and **Live payouts**.
 8. Change `DRY_RUN=false` in Ubuntu `.env`.
 9. Restart:
 
@@ -224,7 +295,7 @@ The environment switch and dashboard switches must all allow movement before fun
 
 ## Operations
 
-Back up the Ubuntu `.env` securely. If `MASTER_ENCRYPTION_KEY` is lost, imported private keys and webhook URLs cannot be recovered. If it is exposed, pause the platform, rotate every revenue wallet, rotate Discord webhooks, and replace the master key.
+Back up the Ubuntu `.env` securely. If `MASTER_ENCRYPTION_KEY` is lost, company wallets and local encrypted secrets cannot be recovered. If `SOURCE_INTERMEDIATE_WALLET_ENCRYPTION_KEY` is lost, mirrored Telegram revenue-wallet keys cannot be decrypted. If either is exposed, pause the platform, rotate affected wallets, rotate Discord webhooks, and replace the exposed key.
 
 Useful commands:
 
@@ -235,7 +306,7 @@ docker compose restart worker
 docker compose exec worker npm run register:discord
 ```
 
-The worker reconciles hosted websites automatically according to `RECONCILE_INTERVAL_MS` and also polls durable manual reconciliation requests. The overview dashboard shows the worker heartbeat, last Helius event, last successful swap, Privacy Cash queue depth, review-required jobs, delayed withdrawal count, and every live-payout prerequisite.
+The worker syncs the Telegram source database according to `SOURCE_SYNC_INTERVAL_MS`, reconciles company Privacy Cash according to `RECONCILE_INTERVAL_MS`, and polls durable manual reconciliation requests. The dashboard shows mirrored revenue wallets, company-wallet status, Privacy Cash jobs, review-required items, active sessions, worker heartbeat, last Helius event, queue depth, review-required jobs, and delayed withdrawal count.
 
 Review [`SECURITY.md`](./SECURITY.md) before enabling mainnet transfers.
 

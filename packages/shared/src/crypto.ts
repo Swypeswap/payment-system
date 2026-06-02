@@ -55,6 +55,30 @@ export function decryptSecret(
   ]).toString("utf8");
 }
 
+export function decryptVersionedSourceSecret(
+  encryptedBlob: string,
+  encodedSourceKey: string
+): string {
+  const [version, nonce, ciphertextWithAuthTag] = encryptedBlob.split(":");
+  if (version !== "v1" || !nonce || !ciphertextWithAuthTag) {
+    throw new Error("Source private key must use v1:<iv>:<ciphertext> format");
+  }
+  const key = Buffer.from(encodedSourceKey, "base64");
+  if (key.length !== 32) {
+    throw new Error("SOURCE_INTERMEDIATE_WALLET_ENCRYPTION_KEY must decode to 32 bytes");
+  }
+  const encrypted = Buffer.from(ciphertextWithAuthTag, "base64");
+  if (encrypted.length <= 16) {
+    throw new Error("Source private key ciphertext is malformed");
+  }
+  const decipher = createDecipheriv("aes-256-gcm", key, Buffer.from(nonce, "base64"));
+  decipher.setAuthTag(encrypted.subarray(encrypted.length - 16));
+  return Buffer.concat([
+    decipher.update(encrypted.subarray(0, encrypted.length - 16)),
+    decipher.final()
+  ]).toString("utf8");
+}
+
 export function parseSecretKey(input: string): Keypair {
   const trimmed = input.trim();
   let bytes: Uint8Array;

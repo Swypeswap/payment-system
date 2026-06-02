@@ -15,14 +15,30 @@ export async function syncHeliusWebhook() {
     return;
   }
   const settings = unwrap(await db.from("app_settings").select("helius_webhook_id").eq("id", true).single());
-  const websites = unwrap(
-    await db
+  const [websites, externalRevenueWallets, companyWallets] = await Promise.all([
+    db
       .from("websites")
       .select("revenue_wallets(address)")
       .eq("active", true)
-      .eq("hosted", true)
-  ) as unknown as Array<{ revenue_wallets: { address: string } }>;
-  const addresses = [...new Set(websites.map((row) => row.revenue_wallets.address))];
+      .eq("hosted", true),
+    db
+      .from("external_revenue_wallets")
+      .select("address")
+      .in("mirror_status", ["active", "retired", "key_erased"]),
+    db
+      .from("company_wallets")
+      .select("address")
+      .in("status", ["active", "archived"])
+  ]);
+  if (websites.error) throw new Error(websites.error.message);
+  if (externalRevenueWallets.error) throw new Error(externalRevenueWallets.error.message);
+  if (companyWallets.error) throw new Error(companyWallets.error.message);
+  const legacyWebsites = websites.data as unknown as Array<{ revenue_wallets: { address: string } }>;
+  const addresses = [...new Set([
+    ...legacyWebsites.map((row) => row.revenue_wallets.address),
+    ...externalRevenueWallets.data.map((row) => row.address),
+    ...companyWallets.data.map((row) => row.address)
+  ])];
   if (addresses.length === 0) {
     console.warn("Helius sync skipped: no hosted website revenue wallets");
     return;

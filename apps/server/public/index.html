@@ -136,5 +136,31 @@
         </div>
       </form>
     </dialog>
+
+    <dialog id="company-key-dialog">
+      <form class="modal-card" method="dialog">
+        <p class="eyebrow">COMPANY WALLET</p>
+        <h2>Private key revealed</h2>
+        <p>This key belongs to <strong id="company-key-address"></strong>. It is never sent through Discord or webhooks.</p>
+        <label>Private key<textarea name="company_private_key" readonly></textarea></label>
+        <div class="modal-actions">
+          <button type="button" class="ghost" id="company-key-close">Close</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="company-key-auth-dialog">
+      <form id="company-key-auth-form" class="modal-card">
+        <p class="eyebrow">SENSITIVE ACCESS</p>
+        <h2>Reveal company key</h2>
+        <p>Re-enter the dashboard password. The key will only be displayed in this browser and will never be sent through Discord.</p>
+        <input type="hidden" name="company_wallet_id" />
+        <label>Dashboard password<input name="dashboard_access_secret" type="password" autocomplete="new-password" autocapitalize="off" spellcheck="false" data-1p-ignore data-lpignore="true" required /></label>
+        <div class="modal-actions">
+          <button type="button" class="ghost" id="company-key-auth-cancel">Cancel</button>
+          <button type="submit" class="danger-action">Reveal key</button>
+        </div>
+      </form>
+    </dialog>
   </body>
 </html>

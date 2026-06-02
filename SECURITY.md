@@ -2,18 +2,22 @@
 
 ## Custody Boundary
 
-This platform is custodial software. Imported revenue-wallet private keys can authorize transfers.
+This platform is custodial software. Mirrored revenue-wallet private keys and company-wallet private keys can authorize transfers.
 
-- Keep `MASTER_ENCRYPTION_KEY`, `SUPABASE_SERVICE_ROLE_KEY`, and `.env` outside source control.
+- Keep `MASTER_ENCRYPTION_KEY`, `SOURCE_INTERMEDIATE_WALLET_ENCRYPTION_KEY`, `SUPABASE_SERVICE_ROLE_KEY`, and `.env` outside source control.
 - Restrict Ubuntu SSH access and file permissions for `.env`.
 - Keep `DRY_RUN=true`, `emergency_paused=true`, swaps disabled, and live payouts disabled until devnet verification is complete.
-- low-bal Useance revenue wallets. Do not import treasury wallets.
-- Rotate revenue wallets, webhook URLs, and the master key immediately if the Ubuntu host is compromised.
-- Cash isPrivacy mainnet-only. Keep `privacy_cash_enabled=false` until a capped mainnet canary has been reviewed.
+- Use low-balance revenue and company wallets. Do not connect treasury wallets.
+- Rotate affected revenue wallets, company wallets, webhook URLs, and encryption keys immediately if the Ubuntu host is compromised.
+- Privacy Cash is mainnet-only. Keep `privacy_cash_enabled=false` until a capped mainnet canary has been reviewed.
 - Treat every Privacy Cash or relayer outage as a manual-review event. Never retry an interrupted withdrawal without checking the recipient transaction first.
 - Owner and manager payout addresses are public addresses only. The Discord bot must never request seed phrases or private keys.
 - Owner wallet updates are authorized by the linked immutable Discord user ID. Usernames are display metadata only.
-- Revenue-wallet CSV exports contain metadata only. Private-key exports are separate, per-wallet, authenticated, password-confirmed, rate-limited, audited, and returned with `no-store` headers.
+- Mirrored Telegram revenue-wallet private keys are never displayed or exportable from the dashboard.
+- Company-wallet private-key reveal is a password-confirmed, rate-limited, audited dashboard action and is never sent through Discord.
+- Legacy local revenue-wallet CSV exports contain metadata only. Private-key exports are separate, per-wallet, authenticated, password-confirmed, rate-limited, audited, and returned with `no-store` headers.
+- The dashboard server container intentionally receives blank `SOURCE_DATABASE_URL` and `SOURCE_INTERMEDIATE_WALLET_ENCRYPTION_KEY` values. Only the worker can read the Telegram source database and decrypt mirrored revenue keys.
+- Retired mirrored revenue keys can be erased only after three continuous empty days and a one-time owner Discord confirmation. After key erasure, a later deposit to that address is unrecoverable through this platform and raises an urgent alert.
 
 ## Dashboard Boundary
 

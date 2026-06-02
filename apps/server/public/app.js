@@ -1,4 +1,4 @@
-const pages = ["overview", "websites", "teams", "wallets", "domains", "webhooks", "activity", "security", "settings"];
+const pages = ["overview", "revenue", "company", "privacy", "review", "webhooks", "activity", "security", "settings"];
 let state = null;
 let page = location.hash === "#security" ? "security" : "overview";
 let walletMode = "active";
@@ -83,7 +83,7 @@ function domainGroupOptions(selected = "") {
   ).join("")}`;
 }
 
-function overview() {
+function legacyOverview() {
   const pool = state.domains.filter((item) => item.status === "pool").length;
   const hosted = state.websites.filter((item) => item.active && item.hosted).length;
   const status = state.settings.emergency_paused ? "Emergency pause enabled" :
@@ -365,7 +365,7 @@ function domains() {
   </div>`;
 }
 
-function webhooks() {
+function legacyWebhooks() {
   const kinds = ["website_request", "website_activation", "deposit", "payout", "security_alert", "worker_error"];
   return `<div class="grid two">
     <article class="card"><h3>Save Discord webhook</h3><p><small>Leave team empty for a global route. A team-specific route overrides the global route.</small></p>
@@ -384,7 +384,7 @@ function activityTable(items, type) {
   </tr>`).join("")}</tbody></table></div>`;
 }
 
-function activity() {
+function legacyActivity() {
   return `<div class="grid two"><article class="card"><h3>Deposits</h3>${activityTable(state.deposits, "deposit")}</article>
     <article class="card"><h3>Payouts</h3>${activityTable(state.payouts, "payout")}</article>
     <article class="card"><h3>Privacy Cash legs</h3>${activityTable(state.privacyCashWithdrawals, "withdrawal")}</article>
@@ -406,7 +406,7 @@ function security() {
   </div>`;
 }
 
-function settings() {
+function legacySettings() {
   const s = state.settings;
   return `<article class="card"><h3>Global defaults and guardrails</h3><form id="settings-form" class="form-grid">
     <label>Threshold USD<input name="global_threshold_usd" type="number" step="0.01" value="${esc(s.global_threshold_usd)}" /></label>
@@ -432,14 +432,219 @@ function settings() {
   </form></article>`;
 }
 
+const routeKinds = [
+  "revenue_deposit_received",
+  "revenue_swap_completed",
+  "revenue_split_completed",
+  "unsafe_spl_detected",
+  "awaiting_sol_for_fees",
+  "performer_configuration_invalid",
+  "swap_failed",
+  "company_threshold_reached",
+  "company_privacy_cash_deposited",
+  "company_privacy_cash_payout_released",
+  "company_wallet_rotation_due",
+  "company_wallet_rotated",
+  "company_wallet_generation_failed",
+  "retired_revenue_wallet_deletion_due",
+  "retired_revenue_wallet_deleted",
+  "retired_revenue_wallet_deletion_expired",
+  "erased_revenue_wallet_received_funds",
+  "archived_company_wallet_deletion_due",
+  "archived_company_wallet_deleted",
+  "archived_company_wallet_deletion_expired",
+  "security_alert",
+  "worker_error"
+];
+
+function lamportsToSol(value) {
+  return `${(Number(value || 0) / 1_000_000_000).toFixed(6)} SOL`;
+}
+
+function money(value) {
+  return `$${Number(value || 0).toLocaleString(undefined, { maximumFractionDigits: 2 })}`;
+}
+
+function activeCompanyWallet() {
+  return state.companyWallets.find((wallet) => wallet.status === "active");
+}
+
+function overview() {
+  const activeRevenue = state.sourceRevenueWallets.filter((wallet) => wallet.mirror_status === "active");
+  const retiredRevenue = state.sourceRevenueWallets.filter((wallet) => wallet.mirror_status === "retired");
+  const company = activeCompanyWallet();
+  const openReviews = state.reviewItems.filter((item) => item.status === "open").length;
+  return `
+    <div class="grid stats">
+      <article class="card stat"><strong>${activeRevenue.length}</strong><span>Active revenue wallets</span></article>
+      <article class="card stat"><strong>${retiredRevenue.length}</strong><span>Retired monitored wallets</span></article>
+      <article class="card stat"><strong>${company ? short(company.address) : "Missing"}</strong><span>Active company wallet</span></article>
+      <article class="card stat"><strong>${openReviews}</strong><span>Review-required items</span></article>
+    </div>
+    <div class="grid two" style="margin-top:1rem">
+      <article class="card"><h3>New flow</h3><div class="stack">
+        <span class="chip ${state.settings.source_sync_enabled ? "good" : "warn"}">External Telegram sync ${state.settings.source_sync_enabled ? "enabled" : "disabled"}</span>
+        <span class="chip ${state.settings.swaps_enabled ? "good" : "warn"}">Guarded SPL and USDC swaps ${state.settings.swaps_enabled ? "enabled" : "disabled"}</span>
+        <span class="chip ${state.settings.privacy_cash_enabled ? "good" : "warn"}">Company Privacy Cash ${state.settings.privacy_cash_enabled ? "enabled" : "disabled"}</span>
+        <span class="chip">Company threshold: ${money(state.settings.company_privacy_cash_threshold_usd)}</span>
+        <span class="chip">Revenue reserve: ${esc(state.settings.revenue_wallet_sol_reserve)} SOL</span>
+      </div></article>
+      ${operationsHealthPanel()}
+    </div>`;
+}
+
+function revenue() {
+  return `<div class="grid two">
+    <article class="card full"><h3>Mirrored revenue wallets</h3>
+      <p><small>Read-only mirror of Telegram-managed sites. Private keys are stored encrypted for the worker only and are never displayed or exportable.</small></p>
+      <div class="table-wrap"><table><thead><tr><th>Domain</th><th>Public wallet</th><th>Performer</th><th>Status</th><th>Balance</th><th>Last seen</th></tr></thead><tbody>
+      ${state.sourceRevenueWallets.map((wallet) => `<tr>
+        <td>${esc(wallet.domain)}</td>
+        <td><code>${esc(short(wallet.address))}</code></td>
+        <td>${esc(wallet.external_performer_id || "-")}</td>
+        <td><span class="chip ${wallet.mirror_status === "active" ? "good" : wallet.mirror_status === "retired" ? "warn" : "bad"}">${esc(wallet.mirror_status)}</span><br /><small>${esc(wallet.external_status)}</small></td>
+        <td>${lamportsToSol(wallet.current_sol_lamports)}<br /><small>${(wallet.current_token_balances || []).length} SPL balances</small></td>
+        <td>${date(wallet.last_seen_at)}</td>
+      </tr>`).join("") || '<tr><td colspan="6"><small>No mirrored revenue wallets yet.</small></td></tr>'}
+      </tbody></table></div>
+    </article>
+    <article class="card"><h3>Latest deposits</h3>${sourceActivityTable(state.sourceDeposits, "deposit")}</article>
+    <article class="card"><h3>Latest splits</h3>${sourceActivityTable(state.sourceSplits, "split")}</article>
+  </div>`;
+}
+
+function company() {
+  const company = activeCompanyWallet();
+  return `<div class="grid two">
+    <article class="card"><h3>Active company wallet</h3>
+      ${company ? `<div class="stack">
+        <p><code>${esc(company.address)}</code></p>
+        <span class="chip good">Active</span>
+        <span class="chip">Received volume: ${money(company.received_volume_usd)}</span>
+        <span class="chip">Balance: ${lamportsToSol(company.current_sol_lamports)}</span>
+        <div class="actions"><button class="ghost" data-reveal-company-key="${company.id}">Reveal private key</button></div>
+        <small>Requires dashboard password re-entry. This key is never sent through Discord.</small>
+      </div>` : `<div class="stack"><p>No active company wallet exists yet.</p><button data-generate-company-wallet>Generate initial company wallet</button></div>`}
+    </article>
+    <article class="card"><h3>Rotation rules</h3><div class="stack">
+      <span class="chip">Long age: ${esc(state.settings.company_rotation_long_days)} days</span>
+      <span class="chip">High volume: ${money(state.settings.company_rotation_high_volume_usd)}</span>
+      <span class="chip">Combined: ${esc(state.settings.company_rotation_short_days)} days and ${money(state.settings.company_rotation_lower_volume_usd)}</span>
+    </div></article>
+    <article class="card full"><h3>Company wallet history</h3><div class="table-wrap"><table><thead><tr><th>Wallet</th><th>Status</th><th>Volume</th><th>Balance</th><th>Activated</th><th>Archived</th><th>Action</th></tr></thead><tbody>
+      ${state.companyWallets.map((wallet) => `<tr>
+        <td><code>${esc(short(wallet.address))}</code></td>
+        <td><span class="chip ${wallet.status === "active" ? "good" : wallet.status === "archived" ? "warn" : "bad"}">${esc(wallet.status)}</span></td>
+        <td>${money(wallet.received_volume_usd)}</td>
+        <td>${lamportsToSol(wallet.current_sol_lamports)}<br /><small>${(wallet.current_token_balances || []).length} SPL balances</small></td>
+        <td>${date(wallet.activated_at)}</td><td>${date(wallet.archived_at)}</td>
+        <td>${wallet.status !== "key_erased" ? `<button class="small ghost" data-reveal-company-key="${wallet.id}">Reveal key</button>` : "<small>Key erased</small>"}</td>
+      </tr>`).join("") || '<tr><td colspan="7"><small>No company wallets yet.</small></td></tr>'}
+    </tbody></table></div></article>
+  </div>`;
+}
+
+function privacy() {
+  return `<div class="grid two">
+    <article class="card"><h3>Company Privacy Cash deposits</h3>${sourceActivityTable(state.companyShields, "shield")}</article>
+    <article class="card"><h3>Delayed owner withdrawals</h3>${sourceActivityTable(state.companyWithdrawals, "withdrawal")}</article>
+  </div>`;
+}
+
+function review() {
+  return `<div class="grid two">
+    <article class="card full"><h3>Review-required items</h3><div class="table-wrap"><table><thead><tr><th>Created</th><th>Severity</th><th>Wallet</th><th>Message</th><th>Status</th></tr></thead><tbody>
+      ${state.reviewItems.map((item) => `<tr>
+        <td>${date(item.created_at)}</td>
+        <td><span class="chip ${item.severity === "critical" ? "bad" : item.severity === "high" ? "warn" : ""}">${esc(item.severity)}</span></td>
+        <td><code>${esc(short(item.external_revenue_wallets?.address || item.company_wallets?.address || ""))}</code></td>
+        <td>${esc(item.message)}</td>
+        <td>${esc(item.status)}</td>
+      </tr>`).join("") || '<tr><td colspan="5"><small>No open review items.</small></td></tr>'}
+    </tbody></table></div></article>
+    <article class="card full"><h3>One-time Discord approvals</h3><div class="table-wrap"><table><thead><tr><th>Created</th><th>Action</th><th>Target</th><th>Status</th><th>Expires</th></tr></thead><tbody>
+      ${state.lifecycleRequests.map((item) => `<tr><td>${date(item.created_at)}</td><td>${esc(item.action)}</td><td>${esc(item.external_revenue_wallets?.domain || short(item.company_wallets?.address || ""))}</td><td>${esc(item.status)}</td><td>${date(item.expires_at)}</td></tr>`).join("") || '<tr><td colspan="5"><small>No lifecycle requests yet.</small></td></tr>'}
+    </tbody></table></div></article>
+  </div>`;
+}
+
+function webhooks() {
+  return `<div class="grid two">
+    <article class="card"><h3>Save Discord webhook</h3><p><small>Each event is configured separately. Webhook URLs are encrypted at rest.</small></p>
+      <form id="route-form" class="stack">
+        <label>Event<select name="kind">${routeKinds.map(k => `<option value="${esc(k)}">${esc(k)}</option>`).join("")}</select></label>
+        <label>Name<input name="name" required /></label>
+        <label>Discord webhook URL<input name="webhook_url" type="url" required /></label>
+        <label><input name="mention_everyone" type="checkbox" /> Mention @everyone</label>
+        <button>Encrypt and save route</button>
+      </form></article>
+    <article class="card"><h3>Configured routes</h3><div class="table-wrap"><table><thead><tr><th>Event</th><th>Name</th><th>@everyone</th><th>Action</th></tr></thead><tbody>
+      ${state.notificationRoutes.map((item) => `<tr><td>${esc(item.kind)}</td><td>${esc(item.name)}</td><td>${item.mention_everyone ? "Yes" : "No"}</td><td><div class="actions"><button class="small ghost" data-test-route="${item.id}">Test</button><button class="small ghost danger" data-delete-route="${item.id}">Remove</button></div></td></tr>`).join("") || '<tr><td colspan="4"><small>No routes configured.</small></td></tr>'}
+    </tbody></table></div></article></div>`;
+}
+
+function sourceActivityTable(items, type) {
+  if (!items.length) return "<small>No records yet.</small>";
+  return `<div class="table-wrap"><table><thead><tr><th>Time</th><th>Wallet</th><th>Status</th><th>Details</th></tr></thead><tbody>${items.slice(0, 20).map((item) => `<tr>
+    <td>${date(item.created_at || item.scheduled_for)}</td>
+    <td>${esc(item.external_revenue_wallets?.domain || short(item.company_wallets?.address || ""))}</td>
+    <td>${esc(item.status || type)}</td>
+    <td><code>${esc(short(item.signature || item.input_mint || item.recipient_kind || ""))}</code>${item.reason || item.error ? `<br /><small>${esc(item.reason || item.error)}</small>` : ""}</td>
+  </tr>`).join("")}</tbody></table></div>`;
+}
+
+function activity() {
+  return `<div class="grid two">
+    <article class="card"><h3>Revenue deposits</h3>${sourceActivityTable(state.sourceDeposits, "deposit")}</article>
+    <article class="card"><h3>Revenue swaps</h3>${sourceActivityTable(state.sourceSwaps, "swap")}</article>
+    <article class="card"><h3>Revenue splits</h3>${sourceActivityTable(state.sourceSplits, "split")}</article>
+    <article class="card"><h3>Company Privacy Cash</h3>${sourceActivityTable(state.companyWithdrawals, "withdrawal")}</article>
+    <article class="card full"><h3>Audit trail</h3><div class="table-wrap"><table><thead><tr><th>Time</th><th>Actor</th><th>Action</th><th>Entity</th></tr></thead><tbody>
+      ${state.auditLogs.map(item => `<tr><td>${date(item.created_at)}</td><td>${esc(item.actor_type)}: ${esc(item.actor_id)}</td><td>${esc(item.action)}</td><td>${esc(item.entity_type)} ${esc(short(item.entity_id))}</td></tr>`).join("")}
+    </tbody></table></div></article></div>`;
+}
+
+function settings() {
+  const s = state.settings;
+  return `<article class="card"><h3>Global defaults and guardrails</h3><form id="settings-form" class="form-grid">
+    <label>Company Privacy Cash threshold USD<input name="company_privacy_cash_threshold_usd" type="number" step="0.01" value="${esc(s.company_privacy_cash_threshold_usd)}" /></label>
+    <label>Revenue wallet SOL reserve<input name="revenue_wallet_sol_reserve" type="number" step="0.000000001" value="${esc(s.revenue_wallet_sol_reserve)}" /></label>
+    <label>Revenue dust threshold USD<input name="revenue_dust_threshold_usd" type="number" step="0.01" value="${esc(s.revenue_dust_threshold_usd)}" /></label>
+    <label>Company wallet SOL reserve<input name="company_wallet_sol_reserve" type="number" step="0.000000001" value="${esc(s.company_wallet_sol_reserve)}" /></label>
+    <label>Max price impact %<input name="max_price_impact_pct" type="number" step="0.0001" value="${esc(s.max_price_impact_pct)}" /></label>
+    <label>Minimum organic score<input name="min_organic_score" type="number" step="0.0001" value="${esc(s.min_organic_score)}" /></label>
+    <label>Privacy min delay hours<input name="privacy_min_delay_hours" type="number" min="24" step="1" value="${esc(s.privacy_min_delay_hours)}" /></label>
+    <label>Privacy max delay hours<input name="privacy_max_delay_hours" type="number" min="24" step="1" value="${esc(s.privacy_max_delay_hours)}" /></label>
+    <label>Company rotate after days<input name="company_rotation_long_days" type="number" min="1" step="1" value="${esc(s.company_rotation_long_days)}" /></label>
+    <label>Company rotate after USD<input name="company_rotation_high_volume_usd" type="number" min="1" step="0.01" value="${esc(s.company_rotation_high_volume_usd)}" /></label>
+    <label>Company combined days<input name="company_rotation_short_days" type="number" min="1" step="1" value="${esc(s.company_rotation_short_days)}" /></label>
+    <label>Company combined USD<input name="company_rotation_lower_volume_usd" type="number" min="1" step="0.01" value="${esc(s.company_rotation_lower_volume_usd)}" /></label>
+    <label>Owners Discord server ID<input name="owners_discord_guild_id" value="${esc(s.owners_discord_guild_id || "")}" /></label>
+    <label>Owners notification channel ID<input name="owners_notifications_channel_id" value="${esc(s.owners_notifications_channel_id || "")}" /></label>
+    <label>Manager role IDs<input name="discord_manager_role_ids" value="${esc((s.discord_manager_role_ids || []).join(","))}" placeholder="legacy comma-separated" /></label>
+    <label>Staff role IDs<input name="discord_staff_role_ids" value="${esc((s.discord_staff_role_ids || []).join(","))}" placeholder="comma-separated" /></label>
+    <label><input name="source_sync_enabled" type="checkbox" ${s.source_sync_enabled ? "checked" : ""}/> Enable external Telegram sync</label>
+    <label><input name="swaps_enabled" type="checkbox" ${s.swaps_enabled ? "checked" : ""}/> Enable guarded SPL and USDC swaps</label>
+    <label><input name="privacy_cash_enabled" type="checkbox" ${s.privacy_cash_enabled ? "checked" : ""}/> Enable company Privacy Cash</label>
+    <label><input name="live_payouts_enabled" type="checkbox" ${s.live_payouts_enabled ? "checked" : ""}/> Enable live payouts</label>
+    <label><input name="emergency_paused" type="checkbox" ${s.emergency_paused ? "checked" : ""}/> Emergency pause</label>
+    <input type="hidden" name="global_threshold_usd" value="${esc(s.global_threshold_usd)}" />
+    <input type="hidden" name="global_sol_reserve" value="${esc(s.global_sol_reserve)}" />
+    <input type="hidden" name="min_swap_usd" value="${esc(s.min_swap_usd)}" />
+    <input type="hidden" name="rotation_warn_after_days" value="${esc(s.rotation_warn_after_days)}" />
+    <input type="hidden" name="rotation_warn_after_legs" value="${esc(s.rotation_warn_after_legs)}" />
+    <input type="hidden" name="rotation_warn_after_usd" value="${esc(s.rotation_warn_after_usd)}" />
+    <input type="hidden" name="rotation_warn_after_weekly_legs" value="${esc(s.rotation_warn_after_weekly_legs)}" />
+    <button class="full">Save settings</button>
+  </form></article>`;
+}
+
 function render() {
   renderNav();
   $("#system-status").textContent = state.settings.emergency_paused ? "PAUSED" :
     state.settings.live_payouts_enabled ? "LIVE" : "DRY RUN";
   $("#system-status").className = `status-pill ${state.settings.emergency_paused ? "bad" : state.settings.live_payouts_enabled ? "good" : "warn"}`;
-  $("#content").innerHTML = ({ overview, websites, teams, wallets, domains, webhooks, activity, security, settings }[page])();
-  if (page === "wallets") syncWalletImportGroup();
-  if (page === "domains") syncDomainImportGroup();
+  $("#content").innerHTML = ({ overview, revenue, company, privacy, review, webhooks, activity, security, settings }[page])();
 }
 
 async function load() {
@@ -503,6 +708,13 @@ function openPrivateKeyDialog(walletId) {
   dialog.querySelector("[name=confirm_label]").value = "";
   dialog.querySelector("[name=dashboard_export_secret]").value = "";
   $("#wallet-private-key-label").textContent = wallet.label;
+  dialog.showModal();
+}
+
+function openCompanyKeyAuthDialog(companyWalletId) {
+  const dialog = $("#company-key-auth-dialog");
+  dialog.querySelector("[name=company_wallet_id]").value = companyWalletId;
+  dialog.querySelector("[name=dashboard_access_secret]").value = "";
   dialog.showModal();
 }
 
@@ -656,13 +868,45 @@ document.addEventListener("submit", async (event) => {
       clearPasswordInputs();
     }
   }
-  if (event.target.id === "route-form") mutate("/api/notification-routes", "POST", { ...values, team_id: values.team_id || null, enabled: true });
+  if (event.target.id === "company-key-auth-form") {
+    try {
+      const result = await api(`/api/company-wallets/${values.company_wallet_id}/reveal-private-key`, {
+        method: "POST",
+        body: JSON.stringify({ password: values.dashboard_access_secret })
+      });
+      $("#company-key-auth-dialog").close();
+      const dialog = $("#company-key-dialog");
+      dialog.querySelector("[name=company_private_key]").value = result.private_key;
+      $("#company-key-address").textContent = result.address;
+      dialog.showModal();
+      notice("Company private key revealed. It was not sent through Discord.");
+    } catch (error) {
+      notice(error.message, "error");
+    } finally {
+      clearPasswordInputs();
+    }
+  }
+  if (event.target.id === "route-form") mutate("/api/notification-routes", "POST", {
+    ...values,
+    team_id: null,
+    enabled: true,
+    mention_everyone: event.target.mention_everyone.checked
+  });
   if (event.target.id === "website-form") mutate("/api/websites", "POST", {
     ...values,
     threshold_usd: optionalNumeric(values.threshold_usd), sol_reserve: optionalNumeric(values.sol_reserve)
   });
   if (event.target.id === "settings-form") mutate("/api/settings", "PUT", {
     global_threshold_usd: Number(values.global_threshold_usd), global_sol_reserve: Number(values.global_sol_reserve),
+    company_privacy_cash_threshold_usd: Number(values.company_privacy_cash_threshold_usd),
+    revenue_wallet_sol_reserve: Number(values.revenue_wallet_sol_reserve),
+    revenue_dust_threshold_usd: Number(values.revenue_dust_threshold_usd),
+    company_wallet_sol_reserve: Number(values.company_wallet_sol_reserve),
+    company_rotation_long_days: Number(values.company_rotation_long_days),
+    company_rotation_high_volume_usd: Number(values.company_rotation_high_volume_usd),
+    company_rotation_short_days: Number(values.company_rotation_short_days),
+    company_rotation_lower_volume_usd: Number(values.company_rotation_lower_volume_usd),
+    source_sync_enabled: event.target.source_sync_enabled.checked,
     min_swap_usd: Number(values.min_swap_usd), max_price_impact_pct: Number(values.max_price_impact_pct),
     min_organic_score: Number(values.min_organic_score), discord_manager_role_ids: splitIds(values.discord_manager_role_ids),
     discord_staff_role_ids: splitIds(values.discord_staff_role_ids), privacy_cash_enabled: event.target.privacy_cash_enabled.checked,
@@ -685,6 +929,14 @@ document.addEventListener("click", async (event) => {
     render();
   }
   if (button.id === "logout") { await api("/api/logout", { method: "POST" }); location.reload(); }
+  if (button.dataset.generateCompanyWallet !== undefined && confirm("Generate the initial company wallet? Store the private key securely after revealing it from the dashboard.")) {
+    mutate("/api/company-wallets/generate-initial", "POST");
+  }
+  if (button.dataset.revealCompanyKey) {
+    openCompanyKeyAuthDialog(button.dataset.revealCompanyKey);
+  }
+  if (button.id === "company-key-auth-cancel") { $("#company-key-auth-dialog").close(); clearPasswordInputs(); }
+  if (button.id === "company-key-close") $("#company-key-dialog").close();
   if (button.dataset.archiveDomain && confirm("Archive this domain?")) mutate(`/api/domains/${button.dataset.archiveDomain}/archive`, "POST");
   if (button.dataset.restoreDomain && confirm("Restore this domain to the active list?")) mutate(`/api/domains/${button.dataset.restoreDomain}`, "PUT", { status: "pool" });
   if (button.dataset.deleteDomain && confirm("Permanently delete this domain? Domains with website history must be archived instead.")) mutate(`/api/domains/${button.dataset.deleteDomain}`, "DELETE");

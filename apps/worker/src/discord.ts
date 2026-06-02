@@ -8,10 +8,17 @@ import {
   TextInputBuilder,
   TextInputStyle,
   type AutocompleteInteraction,
+  type ButtonInteraction,
   type ChatInputCommandInteraction,
   type ModalSubmitInteraction
 } from "discord.js";
-import { validateSolanaWalletAddress } from "@payment/shared";
+import { createHash } from "node:crypto";
+import bs58 from "bs58";
+import {
+  encryptSecret,
+  validateSolanaWalletAddress
+} from "@payment/shared";
+import { Connection, Keypair, PublicKey } from "@solana/web3.js";
 import { db, unwrap } from "./db.js";
 import { env } from "./env.js";
 import {
@@ -20,6 +27,10 @@ import {
   sendRoute,
   setDiscordClient
 } from "./notifications.js";
+
+const connection = new Connection(env.SOLANA_RPC_URL, "confirmed");
+const TOKEN_PROGRAM_ID = new PublicKey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA");
+const TOKEN_2022_PROGRAM_ID = new PublicKey("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb");
 
 interface Team {
   id: string;
@@ -64,6 +75,199 @@ async function requireOwner(interaction: { guildId: string | null; user: { id: s
     throw new Error("This owner command is only available in the configured owners server");
   }
   return loadOwner(interaction.user.id);
+}
+
+function hashActionToken(token: string) {
+  return createHash("sha256").update(token).digest("hex");
+}
+
+async function walletIsEmpty(address: string) {
+  const publicKey = new PublicKey(address);
+  const [solBalance, classic, token2022] = await Promise.all([
+    connection.getBalance(publicKey, "confirmed"),
+    connection.getParsedTokenAccountsByOwner(publicKey, { programId: TOKEN_PROGRAM_ID }),
+    connection.getParsedTokenAccountsByOwner(publicKey, { programId: TOKEN_2022_PROGRAM_ID })
+  ]);
+  const tokenBalances = [...classic.value, ...token2022.value].filter(({ account }) =>
+    BigInt(account.data.parsed.info.tokenAmount.amount as string) > 0n
+  );
+  return solBalance === 0 && tokenBalances.length === 0;
+}
+
+async function completeLifecycleRequest(requestId: string, status: "completed" | "failed", error?: string) {
+  unwrap(
+    await db
+      .from("wallet_lifecycle_requests")
+      .update({
+        status,
+        error: error ?? null,
+        completed_at: status === "completed" ? new Date().toISOString() : null
+      })
+      .eq("id", requestId)
+      .select("id")
+      .single()
+  );
+}
+
+async function handleCompanyRotation(interaction: ButtonInteraction, owner: { id: string; discord_user_id: string }, request: {
+  id: string;
+  company_wallet_id: string;
+}) {
+  try {
+    const keypair = Keypair.generate();
+    const privateKey = bs58.encode(keypair.secretKey);
+    const encrypted = encryptSecret(privateKey, env.MASTER_ENCRYPTION_KEY);
+    const oldWallet = unwrap(
+      await db.from("company_wallets").select("*").eq("id", request.company_wallet_id).single()
+    ) as { id: string; address: string; status: string };
+    if (oldWallet.status !== "active") {
+      throw new Error("The original company wallet is no longer active");
+    }
+    const newWallet = unwrap(
+      await db.rpc("rotate_company_wallet", {
+        requested_old_wallet_id: oldWallet.id,
+        generated_address: keypair.publicKey.toBase58(),
+        generated_encrypted_private_key: encrypted.ciphertext,
+        generated_encryption_nonce: encrypted.nonce,
+        generated_encryption_auth_tag: encrypted.authTag,
+        generated_encryption_key_version: encrypted.keyVersion
+      })
+    );
+    await completeLifecycleRequest(request.id, "completed");
+    unwrap(
+      await db.from("audit_logs").insert({
+        actor_type: "discord",
+        actor_id: owner.discord_user_id,
+        action: "company_wallet.rotated",
+        entity_type: "company_wallet",
+        entity_id: newWallet.id,
+        metadata: { old_wallet_id: oldWallet.id }
+      }).select("id").single()
+    );
+    await sendRoute("company_wallet_rotated", {
+      embeds: [{
+        title: "Company wallet rotated",
+        color: 0x64f5b5,
+        fields: [
+          { name: "Old wallet", value: oldWallet.address },
+          { name: "New wallet", value: newWallet.address },
+          { name: "Approved by", value: `<@${owner.discord_user_id}>` }
+        ]
+      }]
+    });
+    await interaction.reply({
+      content: `Company wallet generated. New active wallet: ${newWallet.address}`,
+      flags: MessageFlags.Ephemeral
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    await completeLifecycleRequest(request.id, "failed", message);
+    await sendRoute("company_wallet_generation_failed", { content: `Company wallet rotation failed: ${message}` });
+    throw error;
+  }
+}
+
+async function handleKeyErasure(interaction: ButtonInteraction, owner: { id: string; discord_user_id: string }, request: {
+  id: string;
+  action: "revenue_key_erasure" | "company_key_erasure";
+  external_revenue_wallet_id: string | null;
+  company_wallet_id: string | null;
+}) {
+  if (request.action === "revenue_key_erasure") {
+    const wallet = unwrap(
+      await db.from("external_revenue_wallets").select("*").eq("id", request.external_revenue_wallet_id).single()
+    ) as { id: string; domain: string; address: string; mirror_status: string };
+    if (wallet.mirror_status !== "retired") throw new Error("Revenue wallet is no longer eligible for key deletion");
+    if (!(await walletIsEmpty(wallet.address))) throw new Error("Revenue wallet is not empty anymore");
+    unwrap(
+      await db
+        .from("external_revenue_wallets")
+        .update({
+          mirror_status: "key_erased",
+          encrypted_private_key_blob: null,
+          key_erased_at: new Date().toISOString()
+        })
+        .eq("id", wallet.id)
+        .eq("mirror_status", "retired")
+        .select("id")
+        .single()
+    );
+    await completeLifecycleRequest(request.id, "completed");
+    await sendRoute("retired_revenue_wallet_deleted", {
+      embeds: [{
+        title: "Retired revenue-wallet key erased",
+        color: 0x64f5b5,
+        fields: [
+          { name: "Domain", value: wallet.domain },
+          { name: "Public wallet", value: wallet.address },
+          { name: "Approved by", value: `<@${owner.discord_user_id}>` }
+        ]
+      }]
+    });
+    await interaction.reply({ content: "Retired revenue-wallet key erased permanently.", flags: MessageFlags.Ephemeral });
+    return;
+  }
+
+  const wallet = unwrap(
+    await db.from("company_wallets").select("*").eq("id", request.company_wallet_id).single()
+  ) as { id: string; address: string; status: string };
+  if (wallet.status !== "archived") throw new Error("Company wallet is no longer eligible for key deletion");
+  if (!(await walletIsEmpty(wallet.address))) throw new Error("Company wallet is not empty anymore");
+  unwrap(
+    await db
+      .from("company_wallets")
+      .update({
+        status: "key_erased",
+        encrypted_private_key: null,
+        encryption_nonce: null,
+        encryption_auth_tag: null,
+        key_erased_at: new Date().toISOString()
+      })
+      .eq("id", wallet.id)
+      .eq("status", "archived")
+      .select("id")
+      .single()
+  );
+  await completeLifecycleRequest(request.id, "completed");
+  await sendRoute("archived_company_wallet_deleted", {
+    embeds: [{
+      title: "Archived company-wallet key erased",
+      color: 0x64f5b5,
+      fields: [
+        { name: "Public wallet", value: wallet.address },
+        { name: "Approved by", value: `<@${owner.discord_user_id}>` }
+      ]
+    }]
+  });
+  await interaction.reply({ content: "Archived company-wallet key erased permanently.", flags: MessageFlags.Ephemeral });
+}
+
+async function handleWalletActionButton(interaction: ButtonInteraction) {
+  const owner = await requireOwner(interaction);
+  const token = interaction.customId.slice("wallet-action:".length);
+  const request = unwrap(
+    await db.rpc("claim_wallet_lifecycle_request", {
+      requested_token_hash: hashActionToken(token),
+      requested_owner_profile_id: owner.id
+    })
+  ) as {
+    id: string;
+    action: "company_rotation" | "revenue_key_erasure" | "company_key_erasure";
+    external_revenue_wallet_id: string | null;
+    company_wallet_id: string | null;
+  };
+  if (request.action === "company_rotation") {
+    return handleCompanyRotation(interaction, owner, {
+      id: request.id,
+      company_wallet_id: request.company_wallet_id ?? ""
+    });
+  }
+  return handleKeyErasure(interaction, owner, {
+    id: request.id,
+    action: request.action,
+    external_revenue_wallet_id: request.external_revenue_wallet_id,
+    company_wallet_id: request.company_wallet_id
+  });
 }
 
 async function loadTeams(): Promise<Team[]> {
@@ -507,6 +711,9 @@ export async function startDiscordBot() {
   client.on(Events.InteractionCreate, async (interaction) => {
     try {
       if (interaction.isAutocomplete()) return await handleAutocomplete(interaction);
+      if (interaction.isButton() && interaction.customId.startsWith("wallet-action:")) {
+        return await handleWalletActionButton(interaction);
+      }
       if (interaction.isChatInputCommand()) {
         if (interaction.commandName === "request-website") return await handleRequestWebsite(interaction);
         if (interaction.commandName === "wallet-update") return await handleWalletUpdate(interaction);

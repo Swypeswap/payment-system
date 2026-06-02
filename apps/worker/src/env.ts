@@ -17,6 +17,12 @@ const envSchema = z.object({
   DISCORD_APPLICATION_ID: optionalSecret,
   DISCORD_GUILD_ID: optionalSecret,
   DISCORD_OWNERS_GUILD_ID: optionalSecret,
+  SOURCE_DATABASE_URL: z.string().url().optional(),
+  SOURCE_INTERMEDIATE_WALLET_ENCRYPTION_KEY: z.string().min(40).optional(),
+  SOURCE_DATABASE_SSL_REJECT_UNAUTHORIZED: z
+    .string()
+    .default("false")
+    .transform((value) => value.toLowerCase() === "true"),
   DRY_RUN: z
     .string()
     .default("true")
@@ -26,6 +32,7 @@ const envSchema = z.object({
   PRIVACY_CASH_INTERVAL_MS: z.coerce.number().int().positive().default(60_000),
   ROTATION_CHECK_INTERVAL_MS: z.coerce.number().int().positive().default(21_600_000),
   HELIUS_SYNC_INTERVAL_MS: z.coerce.number().int().positive().default(600_000),
+  SOURCE_SYNC_INTERVAL_MS: z.coerce.number().int().positive().default(15_000),
   WORKER_ID: z.string().default(`${hostname()}-${process.pid}`)
 });
 

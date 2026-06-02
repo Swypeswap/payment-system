@@ -19,6 +19,22 @@ export interface PrivacyCashDistributionPlan {
   withdrawals: PrivacyCashWithdrawalPlan[];
 }
 
+export interface OwnerPrivacyCashWithdrawalPlan {
+  recipientKind: "owner_1" | "owner_2" | "owner_3";
+  legIndex: number;
+  netLamports: bigint;
+  grossLamports: bigint;
+  estimatedFeeLamports: bigint;
+}
+
+export interface OwnerPrivacyCashDistributionPlan {
+  netDistributionLamports: bigint;
+  grossDistributionLamports: bigint;
+  estimatedFeeLamports: bigint;
+  dustLamports: bigint;
+  withdrawals: OwnerPrivacyCashWithdrawalPlan[];
+}
+
 function safeNumber(value: bigint): number {
   if (value > BigInt(Number.MAX_SAFE_INTEGER)) {
     throw new Error("Lamport amount exceeds JavaScript safe integer range");
@@ -154,6 +170,90 @@ export function planPrivacyCashDistribution(
     0n
   );
   const netDistributionLamports = low * 10n;
+  return {
+    netDistributionLamports,
+    grossDistributionLamports,
+    estimatedFeeLamports: grossDistributionLamports - netDistributionLamports,
+    dustLamports: shieldLamports - grossDistributionLamports,
+    withdrawals
+  };
+}
+
+export function planOwnerPrivacyCashDistribution(
+  shieldLamports: bigint,
+  config: PrivacyCashFeeConfig,
+  recipientLegWeights: number[][] = [[1], [1], [1]]
+): OwnerPrivacyCashDistributionPlan {
+  validateFeeConfig(config);
+  if (shieldLamports <= 0n) {
+    throw new Error("Shielded balance must be positive");
+  }
+  if (
+    recipientLegWeights.length !== 3 ||
+    recipientLegWeights.some((weights) =>
+      weights.length < 1 ||
+      weights.some((weight) => !Number.isSafeInteger(weight) || weight <= 0)
+    )
+  ) {
+    throw new Error("Owner payout leg weights must contain three positive integer groups");
+  }
+
+  const splitByWeights = (total: bigint, weights: number[]) => {
+    const totalWeight = BigInt(weights.reduce((sum, weight) => sum + weight, 0));
+    let assigned = 0n;
+    return weights.map((weight, index) => {
+      const value =
+        index === weights.length - 1
+          ? total - assigned
+          : total * BigInt(weight) / totalWeight;
+      assigned += value;
+      return value;
+    });
+  };
+
+  const withdrawalsForUnits = (units: bigint): OwnerPrivacyCashWithdrawalPlan[] =>
+    ([
+      ["owner_1", units * 33n],
+      ["owner_2", units * 33n],
+      ["owner_3", units * 34n]
+    ] as const).flatMap(([recipientKind, recipientNetLamports], recipientIndex) =>
+      splitByWeights(recipientNetLamports, recipientLegWeights[recipientIndex] ?? []).map(
+        (netLamports, legIndex) => {
+          const grossLamports = grossUpPrivacyCashWithdrawal(netLamports, config);
+          return {
+            recipientKind,
+            legIndex,
+            netLamports,
+            grossLamports,
+            estimatedFeeLamports: grossLamports - netLamports
+          };
+        }
+      )
+    );
+
+  const costForUnits = (units: bigint) =>
+    withdrawalsForUnits(units).reduce((total, item) => total + item.grossLamports, 0n);
+
+  let low = 0n;
+  let high = shieldLamports / 100n;
+  while (low < high) {
+    const middle = (low + high + 1n) / 2n;
+    if (costForUnits(middle) <= shieldLamports) {
+      low = middle;
+    } else {
+      high = middle - 1n;
+    }
+  }
+  if (low === 0n) {
+    throw new Error("Shielded balance is too small to cover owner Privacy Cash withdrawals");
+  }
+
+  const withdrawals = withdrawalsForUnits(low);
+  const grossDistributionLamports = withdrawals.reduce(
+    (total, item) => total + item.grossLamports,
+    0n
+  );
+  const netDistributionLamports = low * 100n;
   return {
     netDistributionLamports,
     grossDistributionLamports,

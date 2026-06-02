@@ -1,6 +1,7 @@
 import { createHash, timingSafeEqual } from "node:crypto";
 import bcrypt from "bcryptjs";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
+import { Keypair } from "@solana/web3.js";
 import {
   NOTIFICATION_KINDS,
   decryptSecret,
@@ -448,6 +449,16 @@ export async function registerRoutes(app: FastifyInstance) {
         rotationNotifications,
         auditLogs,
         walletHistory,
+        sourcePerformers,
+        sourceRevenueWallets,
+        sourceDeposits,
+        sourceSwaps,
+        sourceSplits,
+        companyWallets,
+        reviewItems,
+        companyShields,
+        companyWithdrawals,
+        lifecycleRequests,
         routes
       ] = await Promise.all([
         db.from("app_settings").select("*").eq("id", true).single(),
@@ -477,6 +488,16 @@ export async function registerRoutes(app: FastifyInstance) {
         db.from("wallet_rotation_notifications").select("*").order("created_at", { ascending: false }).limit(100),
         db.from("audit_logs").select("*").order("created_at", { ascending: false }).limit(100),
         db.from("wallet_update_history").select("*,teams(name)").order("created_at", { ascending: false }).limit(50),
+        db.from("source_performer_snapshots").select("*").order("synced_at", { ascending: false }).limit(200),
+        db.from("external_revenue_wallets").select("id,external_site_id,domain,address,external_status,mirror_status,external_performer_id,last_seen_at,retired_at,empty_since,key_erased_at,current_sol_lamports,current_token_balances,last_balance_checked_at,created_at,updated_at").order("updated_at", { ascending: false }).limit(500),
+        db.from("external_revenue_deposits").select("*,external_revenue_wallets(domain,address)").order("created_at", { ascending: false }).limit(100),
+        db.from("external_revenue_swap_attempts").select("*,external_revenue_wallets(domain,address)").order("created_at", { ascending: false }).limit(100),
+        db.from("external_revenue_split_attempts").select("*,external_revenue_wallets(domain,address),company_wallets(address)").order("created_at", { ascending: false }).limit(100),
+        db.from("company_wallets").select("id,address,status,activated_at,archived_at,empty_since,key_erased_at,received_volume_usd,current_sol_lamports,current_token_balances,last_balance_checked_at,created_at,updated_at").order("created_at", { ascending: false }),
+        db.from("review_required_items").select("*,external_revenue_wallets(domain,address),company_wallets(address)").order("created_at", { ascending: false }).limit(100),
+        db.from("company_privacy_cash_shield_jobs").select("*,company_wallets(address)").order("created_at", { ascending: false }).limit(100),
+        db.from("company_privacy_cash_withdrawal_jobs").select("*,company_wallets(address),owner_profiles(display_name)").order("scheduled_for", { ascending: false }).limit(100),
+        db.from("wallet_lifecycle_requests").select("*,external_revenue_wallets(domain,address),company_wallets(address)").order("created_at", { ascending: false }).limit(100),
         listRedactedRoutes()
       ]);
 
@@ -503,6 +524,16 @@ export async function registerRoutes(app: FastifyInstance) {
         rotationNotifications: unwrap(rotationNotifications),
         auditLogs: unwrap(auditLogs),
         walletHistory: unwrap(walletHistory),
+        sourcePerformers: unwrap(sourcePerformers),
+        sourceRevenueWallets: unwrap(sourceRevenueWallets),
+        sourceDeposits: unwrap(sourceDeposits),
+        sourceSwaps: unwrap(sourceSwaps),
+        sourceSplits: unwrap(sourceSplits),
+        companyWallets: unwrap(companyWallets),
+        reviewItems: unwrap(reviewItems),
+        companyShields: unwrap(companyShields),
+        companyWithdrawals: unwrap(companyWithdrawals),
+        lifecycleRequests: unwrap(lifecycleRequests),
         notificationRoutes: routes,
         operations: await loadOperationsDashboard(settingsData, websitesData, ownersData)
       };
@@ -536,6 +567,15 @@ export async function registerRoutes(app: FastifyInstance) {
         .object({
           global_threshold_usd: z.number().positive(),
           global_sol_reserve: z.number().nonnegative(),
+          company_privacy_cash_threshold_usd: z.number().positive(),
+          revenue_wallet_sol_reserve: z.number().nonnegative(),
+          revenue_dust_threshold_usd: z.number().nonnegative(),
+          company_wallet_sol_reserve: z.number().nonnegative(),
+          company_rotation_long_days: z.number().int().positive(),
+          company_rotation_high_volume_usd: z.number().positive(),
+          company_rotation_short_days: z.number().int().positive(),
+          company_rotation_lower_volume_usd: z.number().positive(),
+          source_sync_enabled: z.boolean(),
           min_swap_usd: z.number().nonnegative(),
           max_price_impact_pct: z.number().nonnegative(),
           min_organic_score: percent,
@@ -558,6 +598,9 @@ export async function registerRoutes(app: FastifyInstance) {
       if (values.privacy_max_delay_hours < values.privacy_min_delay_hours) {
         throw new Error("Maximum Privacy Cash delay must be at least the minimum delay");
       }
+      if (values.company_rotation_short_days > values.company_rotation_long_days) {
+        throw new Error("Short company rotation window must be shorter than the long window");
+      }
       const data = unwrap(
         await db.from("app_settings").update(values).eq("id", true).select("*").single()
       );
@@ -568,6 +611,75 @@ export async function registerRoutes(app: FastifyInstance) {
       });
       return data;
     });
+
+    protectedApi.post("/api/company-wallets/generate-initial", async () => {
+      const existing = await db
+        .from("company_wallets")
+        .select("id")
+        .eq("status", "active")
+        .maybeSingle();
+      if (existing.error) throw new Error(existing.error.message);
+      if (existing.data) {
+        throw new Error("An active company wallet already exists");
+      }
+      const keypair = Keypair.generate();
+      const encrypted = encryptSecret(
+        JSON.stringify(Array.from(keypair.secretKey)),
+        env.MASTER_ENCRYPTION_KEY
+      );
+      const data = unwrap(
+        await db
+          .from("company_wallets")
+          .insert({
+            address: keypair.publicKey.toBase58(),
+            encrypted_private_key: encrypted.ciphertext,
+            encryption_nonce: encrypted.nonce,
+            encryption_auth_tag: encrypted.authTag,
+            encryption_key_version: encrypted.keyVersion,
+            status: "active"
+          })
+          .select("id,address,status,activated_at")
+          .single()
+      );
+      await audit("company_wallet.generated_initial", "company_wallet", data.id);
+      return data;
+    });
+
+    protectedApi.post(
+      "/api/company-wallets/:id/reveal-private-key",
+      { config: { rateLimit: { max: 5, timeWindow: "1 minute" } } },
+      async (request) => {
+        const { id } = z.object({ id: uuid }).parse(request.params);
+        const { password } = z.object({ password: z.string().min(1) }).parse(request.body);
+        if (!(await bcrypt.compare(password, env.DASHBOARD_PASSWORD_HASH))) {
+          throw new Error("Invalid dashboard password");
+        }
+        const wallet = unwrap(
+          await db
+            .from("company_wallets")
+            .select("address,encrypted_private_key,encryption_nonce,encryption_auth_tag,encryption_key_version,status")
+            .eq("id", id)
+            .single()
+        );
+        if (!wallet.encrypted_private_key || !wallet.encryption_nonce || !wallet.encryption_auth_tag || !wallet.encryption_key_version) {
+          throw new Error("This company wallet private key has been erased");
+        }
+        const privateKey = decryptSecret(
+          {
+            ciphertext: wallet.encrypted_private_key,
+            nonce: wallet.encryption_nonce,
+            authTag: wallet.encryption_auth_tag,
+            keyVersion: wallet.encryption_key_version
+          },
+          env.MASTER_ENCRYPTION_KEY
+        );
+        await audit("company_wallet.private_key_revealed", "company_wallet", id, {
+          address: wallet.address,
+          status: wallet.status
+        });
+        return { address: wallet.address, private_key: privateKey };
+      }
+    );
 
     protectedApi.post("/api/domain-groups", async (request) => {
       const values = z
@@ -1336,7 +1448,8 @@ export async function registerRoutes(app: FastifyInstance) {
           team_id: uuid.nullable().optional(),
           name: z.string().trim().min(1),
           webhook_url: z.string().url(),
-          enabled: z.boolean().default(true)
+          enabled: z.boolean().default(true),
+          mention_everyone: z.boolean().default(false)
         })
         .parse(request.body);
       const encrypted = encryptWebhookUrl(values.webhook_url);
@@ -1345,6 +1458,7 @@ export async function registerRoutes(app: FastifyInstance) {
         team_id: values.team_id ?? null,
         name: values.name,
         enabled: values.enabled,
+        mention_everyone: values.mention_everyone,
         encrypted_webhook_url: encrypted.ciphertext,
         encryption_nonce: encrypted.nonce,
         encryption_auth_tag: encrypted.authTag,
@@ -1354,7 +1468,7 @@ export async function registerRoutes(app: FastifyInstance) {
         await db
           .from("notification_routes")
           .upsert(row, { onConflict: "kind,team_id" })
-          .select("id,kind,team_id,name,enabled,updated_at")
+          .select("id,kind,team_id,name,enabled,mention_everyone,updated_at")
           .single()
       );
       await audit("notification_route.saved", "notification_route", data.id, {
@@ -1367,12 +1481,12 @@ export async function registerRoutes(app: FastifyInstance) {
     protectedApi.post("/api/notification-routes/:id/test", async (request) => {
       const { id } = z.object({ id: uuid }).parse(request.params);
       const route = unwrap(
-        await db.from("notification_routes").select("kind,team_id").eq("id", id).single()
+        await db.from("notification_routes").select("kind,team_id,mention_everyone").eq("id", id).single()
       );
       const delivered = await sendWebhook(
         route.kind,
         { content: "Payment platform webhook test succeeded." },
-        { teamId: route.team_id ?? undefined }
+        { teamId: route.team_id ?? undefined, mentionEveryone: route.mention_everyone }
       );
       return { delivered };
     });

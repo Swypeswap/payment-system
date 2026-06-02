@@ -4,7 +4,7 @@ import {
   decryptSecret,
   type NotificationKind
 } from "@payment/shared";
-import type { Client } from "discord.js";
+import { ActionRowBuilder, ButtonBuilder, ButtonStyle, type Client } from "discord.js";
 import { db } from "./db.js";
 import { env } from "./env.js";
 
@@ -60,7 +60,7 @@ export async function sendRoute(
       ...payload,
       username: CONFETTI_WEBHOOK_NAMES[kind],
       avatar_url: CONFETTI_WEBHOOK_AVATAR_URL,
-      allowed_mentions: { parse: [] }
+      allowed_mentions: { parse: row.mention_everyone ? ["everyone"] : [] }
     })
   });
   if (!response.ok) throw new Error(`Discord webhook failed with HTTP ${response.status}`);
@@ -106,6 +106,39 @@ export async function sendOwnersMessage(content: string, mentionEveryone = false
     content,
     mentionEveryone ? { parse: ["everyone"] } : {}
   );
+}
+
+export async function sendOwnersActionMessage(values: {
+  content: string;
+  buttonCustomId: string;
+  buttonLabel: string;
+  buttonStyle?: ButtonStyle;
+  mentionEveryone?: boolean;
+}) {
+  if (!discordClient) return false;
+  const settings = await db
+    .from("app_settings")
+    .select("owners_notifications_channel_id")
+    .eq("id", true)
+    .single();
+  if (settings.error) throw new Error(settings.error.message);
+  if (!settings.data.owners_notifications_channel_id) return false;
+  const channel = await discordClient.channels.fetch(settings.data.owners_notifications_channel_id);
+  if (!channel?.isTextBased() || !("send" in channel)) {
+    throw new Error("Configured Discord notification channel is not a text channel");
+  }
+  const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
+    new ButtonBuilder()
+      .setCustomId(values.buttonCustomId)
+      .setLabel(values.buttonLabel)
+      .setStyle(values.buttonStyle ?? ButtonStyle.Primary)
+  );
+  await channel.send({
+    content: values.content,
+    components: [row],
+    allowedMentions: values.mentionEveryone ? { parse: ["everyone"] } : {}
+  });
+  return true;
 }
 
 export async function sendManagerMessage(
