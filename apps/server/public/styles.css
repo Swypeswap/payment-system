@@ -105,6 +105,7 @@ dialog::backdrop { background: rgba(3, 3, 4, 0.84); backdrop-filter: blur(7px); 
 .login-logo { width: 4.4rem; height: 4.4rem; border-radius: 1.15rem; object-fit: cover; border: 1px solid rgba(255, 99, 178, 0.55); box-shadow: 0 0 2.4rem rgba(255, 36, 109, 0.4); }
 .modal-card { display: grid; gap: 0.9rem; width: min(27rem, calc(100vw - 2rem)); padding: 1.4rem; }
 .modal-card.company-key-card { width: min(42rem, calc(100vw - 2rem)); }
+.modal-card.performer-card { width: min(54rem, calc(100vw - 2rem)); }
 .modal-card p { margin-bottom: 0; color: var(--muted); }
 .modal-card strong { color: var(--text); overflow-wrap: anywhere; }
 .modal-actions { display: flex; justify-content: flex-end; gap: 0.6rem; margin-top: 0.25rem; }

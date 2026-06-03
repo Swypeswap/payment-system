@@ -60,6 +60,44 @@
       </form>
     </dialog>
 
+    <dialog id="confirm-dialog">
+      <form id="confirm-form" class="modal-card">
+        <p class="eyebrow" id="confirm-eyebrow">CONFIRM ACTION</p>
+        <h2 id="confirm-title">Confirm action</h2>
+        <p id="confirm-message"></p>
+        <div class="modal-actions">
+          <button type="button" class="ghost" id="confirm-cancel">Cancel</button>
+          <button type="submit" id="confirm-submit">Confirm</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="prompt-dialog">
+      <form id="prompt-form" class="modal-card">
+        <p class="eyebrow" id="prompt-eyebrow">DASHBOARD INPUT</p>
+        <h2 id="prompt-title">Update value</h2>
+        <p id="prompt-message"></p>
+        <label id="prompt-input-wrap"><span id="prompt-label">Value</span><input name="prompt_value" autocomplete="off" /></label>
+        <label id="prompt-textarea-wrap" hidden><span id="prompt-textarea-label">Value</span><textarea name="prompt_textarea" autocomplete="off"></textarea></label>
+        <div class="modal-actions">
+          <button type="button" class="ghost" id="prompt-cancel">Cancel</button>
+          <button type="submit" id="prompt-submit">Save</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="performer-details-dialog">
+      <form class="modal-card performer-card" method="dialog">
+        <p class="eyebrow">PERFORMER MIRROR</p>
+        <h2 id="performer-details-title">Performer details</h2>
+        <div id="performer-details-body" class="stack"></div>
+        <div class="modal-actions">
+          <button type="button" id="performer-copy-wallet">Copy payout wallet</button>
+          <button type="button" class="ghost" id="performer-details-close">Close</button>
+        </div>
+      </form>
+    </dialog>
+
     <dialog id="wallet-edit-dialog">
       <form id="wallet-edit-form" class="modal-card">
         <p class="eyebrow">WALLET ORGANIZATION</p>

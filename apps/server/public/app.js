@@ -1,6 +1,10 @@
 const pages = ["overview", "revenue", "company", "privacy", "review", "webhooks", "activity", "security", "settings"];
 let state = null;
-let page = location.hash === "#security" ? "security" : "overview";
+function pageFromHash() {
+  const value = decodeURIComponent(location.hash.replace(/^#/, "")).toLowerCase();
+  return pages.includes(value) ? value : "overview";
+}
+let page = pageFromHash();
 let walletMode = "active";
 let domainMode = "active";
 
@@ -49,6 +53,106 @@ async function mutate(url, method, body) {
   } catch (error) {
     notice(error.message, "error");
   }
+}
+
+function askConfirm({
+  title = "Confirm action",
+  message = "",
+  confirmText = "Confirm",
+  danger = false,
+  eyebrow = "CONFIRM ACTION"
+} = {}) {
+  return new Promise((resolve) => {
+    const dialog = $("#confirm-dialog");
+    const form = $("#confirm-form");
+    const submit = $("#confirm-submit");
+    let settled = false;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      form.removeEventListener("submit", onSubmit);
+      $("#confirm-cancel").removeEventListener("click", onCancel);
+      dialog.removeEventListener("cancel", onCancel);
+      resolve(value);
+    };
+    const onSubmit = (event) => {
+      event.preventDefault();
+      dialog.close();
+      finish(true);
+    };
+    const onCancel = () => {
+      dialog.close();
+      finish(false);
+    };
+    $("#confirm-eyebrow").textContent = eyebrow;
+    $("#confirm-title").textContent = title;
+    $("#confirm-message").textContent = message;
+    submit.textContent = confirmText;
+    submit.className = danger ? "danger-action" : "";
+    form.addEventListener("submit", onSubmit);
+    $("#confirm-cancel").addEventListener("click", onCancel);
+    dialog.addEventListener("cancel", onCancel);
+    dialog.showModal();
+  });
+}
+
+function askText({
+  title = "Update value",
+  message = "",
+  label = "Value",
+  value = "",
+  submitText = "Save",
+  multiline = false,
+  required = false,
+  eyebrow = "DASHBOARD INPUT"
+} = {}) {
+  return new Promise((resolve) => {
+    const dialog = $("#prompt-dialog");
+    const form = $("#prompt-form");
+    const input = form.querySelector("[name=prompt_value]");
+    const textarea = form.querySelector("[name=prompt_textarea]");
+    const inputWrap = $("#prompt-input-wrap");
+    const textareaWrap = $("#prompt-textarea-wrap");
+    let settled = false;
+    const activeField = multiline ? textarea : input;
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      form.removeEventListener("submit", onSubmit);
+      $("#prompt-cancel").removeEventListener("click", onCancel);
+      dialog.removeEventListener("cancel", onCancel);
+      resolve(result);
+    };
+    const onSubmit = (event) => {
+      event.preventDefault();
+      dialog.close();
+      finish(activeField.value);
+    };
+    const onCancel = () => {
+      dialog.close();
+      finish(null);
+    };
+    $("#prompt-eyebrow").textContent = eyebrow;
+    $("#prompt-title").textContent = title;
+    $("#prompt-message").textContent = message;
+    $("#prompt-label").textContent = label;
+    $("#prompt-textarea-label").textContent = label;
+    $("#prompt-submit").textContent = submitText;
+    inputWrap.hidden = multiline;
+    input.disabled = multiline;
+    input.required = !multiline && required;
+    textareaWrap.hidden = !multiline;
+    textarea.disabled = !multiline;
+    textarea.required = multiline && required;
+    input.value = multiline ? "" : value;
+    textarea.value = multiline ? value : "";
+    form.addEventListener("submit", onSubmit);
+    $("#prompt-cancel").addEventListener("click", onCancel);
+    dialog.addEventListener("cancel", onCancel);
+    dialog.showModal();
+    activeField.focus();
+    activeField.select?.();
+  });
 }
 
 function renderNav() {
@@ -490,6 +594,25 @@ function activeCompanyWallet() {
   return state.companyWallets.find((wallet) => wallet.status === "active");
 }
 
+function performerFor(telegramUserId) {
+  if (!telegramUserId) return null;
+  return state.sourcePerformers.find((performer) =>
+    String(performer.telegram_user_id) === String(telegramUserId)
+  ) || null;
+}
+
+function linkedRevenueWalletsForPerformer(telegramUserId) {
+  if (!telegramUserId) return [];
+  return state.sourceRevenueWallets.filter((wallet) =>
+    String(wallet.external_performer_id) === String(telegramUserId)
+  );
+}
+
+function performerDisplayName(performer, fallbackId) {
+  if (performer?.telegram_username) return `@${performer.telegram_username}`;
+  return fallbackId ? String(fallbackId) : "-";
+}
+
 function overview() {
   const activeRevenue = state.sourceRevenueWallets.filter((wallet) => wallet.mirror_status === "active");
   const retiredRevenue = state.sourceRevenueWallets.filter((wallet) => wallet.mirror_status === "retired");
@@ -519,15 +642,19 @@ function revenue() {
     ${sourceSyncDiagnosticsPanel()}
     <article class="card full"><h3>Mirrored revenue wallets</h3>
       <p><small>Read-only mirror of Telegram-managed sites. Private keys are stored encrypted for the worker only and are never displayed or exportable.</small></p>
-      <div class="table-wrap"><table><thead><tr><th>Domain</th><th>Public wallet</th><th>Performer</th><th>Status</th><th>Balance</th><th>Last seen</th></tr></thead><tbody>
-      ${state.sourceRevenueWallets.map((wallet) => `<tr>
+      <div class="table-wrap"><table><thead><tr><th>Domain</th><th>Public wallet</th><th>Performer</th><th>Status</th><th>Balance</th><th>Last seen</th><th>Action</th></tr></thead><tbody>
+      ${state.sourceRevenueWallets.map((wallet) => {
+        const performer = performerFor(wallet.external_performer_id);
+        return `<tr>
         <td>${esc(wallet.domain)}</td>
         <td><code>${esc(short(wallet.address))}</code></td>
-        <td>${esc(wallet.external_performer_id || "-")}</td>
+        <td>${esc(performerDisplayName(performer, wallet.external_performer_id))}<br /><small><code>${esc(short(performer?.payout_wallet || ""))}</code></small></td>
         <td><span class="chip ${wallet.mirror_status === "active" ? "good" : wallet.mirror_status === "retired" ? "warn" : "bad"}">${esc(wallet.mirror_status)}</span><br /><small>${esc(wallet.external_status)}</small></td>
         <td>${lamportsToSol(wallet.current_sol_lamports)}<br /><small>${(wallet.current_token_balances || []).length} SPL balances</small></td>
         <td>${date(wallet.last_seen_at)}</td>
-      </tr>`).join("") || '<tr><td colspan="6"><small>No mirrored revenue wallets yet.</small></td></tr>'}
+        <td><button class="small ghost" data-expand-performer="${esc(wallet.external_performer_id || "")}">Expand</button></td>
+      </tr>`;
+      }).join("") || '<tr><td colspan="7"><small>No mirrored revenue wallets yet.</small></td></tr>'}
       </tbody></table></div>
     </article>
     <article class="card"><h3>Latest deposits</h3>${sourceActivityTable(state.sourceDeposits, "deposit")}</article>
@@ -624,8 +751,9 @@ function activity() {
     <article class="card"><h3>Revenue swaps</h3>${sourceActivityTable(state.sourceSwaps, "swap")}</article>
     <article class="card"><h3>Revenue splits</h3>${sourceActivityTable(state.sourceSplits, "split")}</article>
     <article class="card"><h3>Company Privacy Cash</h3>${sourceActivityTable(state.companyWithdrawals, "withdrawal")}</article>
-    <article class="card full"><h3>Audit trail</h3><div class="table-wrap"><table><thead><tr><th>Time</th><th>Actor</th><th>Action</th><th>Entity</th></tr></thead><tbody>
-      ${state.auditLogs.map(item => `<tr><td>${date(item.created_at)}</td><td>${esc(item.actor_type)}: ${esc(item.actor_id)}</td><td>${esc(item.action)}</td><td>${esc(item.entity_type)} ${esc(short(item.entity_id))}</td></tr>`).join("")}
+    <article class="card full"><div class="wallet-toolbar"><div><h3>Audit trail</h3><small>Clearing this permanently deletes the dashboard audit rows currently stored in the database.</small></div><button class="danger-action" data-clear-audit-log>Clear</button></div>
+    <div class="table-wrap" style="margin-top:0.8rem"><table><thead><tr><th>Time</th><th>Actor</th><th>Action</th><th>Entity</th></tr></thead><tbody>
+      ${state.auditLogs.map(item => `<tr><td>${date(item.created_at)}</td><td>${esc(item.actor_type)}: ${esc(item.actor_id)}</td><td>${esc(item.action)}</td><td>${esc(item.entity_type)} ${esc(short(item.entity_id))}</td></tr>`).join("") || '<tr><td colspan="4"><small>No audit rows stored.</small></td></tr>'}
     </tbody></table></div></article></div>`;
 }
 
@@ -812,6 +940,31 @@ function openAssignManagerDialog(teamId) {
   dialog.showModal();
 }
 
+function openPerformerDetailsDialog(telegramUserId) {
+  const performer = performerFor(telegramUserId);
+  const linked = linkedRevenueWalletsForPerformer(telegramUserId);
+  const dialog = $("#performer-details-dialog");
+  const payoutWallet = performer?.payout_wallet || "";
+  dialog.dataset.payoutWallet = payoutWallet;
+  $("#performer-details-title").textContent = performerDisplayName(performer, telegramUserId);
+  $("#performer-copy-wallet").disabled = !payoutWallet;
+  $("#performer-details-body").innerHTML = `
+    <div class="metric-grid">
+      <div><strong>${esc(performerDisplayName(performer, telegramUserId))}</strong><small>Telegram username</small></div>
+      <div><strong>${esc(telegramUserId || "-")}</strong><small>Telegram user ID</small></div>
+      <div><strong>${performer?.approved ? "Approved" : "Not approved"}</strong><small>Approval status</small></div>
+      <div><strong>${performer?.commission_pct ?? "-"}</strong><small>Commission %</small></div>
+      <div><strong>${date(performer?.source_updated_at)}</strong><small>Source updated</small></div>
+      <div><strong>${date(performer?.synced_at)}</strong><small>Last mirrored</small></div>
+    </div>
+    <label>Payout wallet<textarea class="key-output" readonly spellcheck="false">${esc(payoutWallet || "No payout wallet mirrored")}</textarea></label>
+    <div class="table-wrap"><table><thead><tr><th>Linked domain</th><th>Revenue wallet</th><th>Status</th><th>Last seen</th></tr></thead><tbody>
+      ${linked.map((wallet) => `<tr><td>${esc(wallet.domain)}</td><td><code>${esc(wallet.address)}</code></td><td>${esc(wallet.mirror_status)}<br /><small>${esc(wallet.external_status)}</small></td><td>${date(wallet.last_seen_at)}</td></tr>`).join("") || '<tr><td colspan="4"><small>No linked domains mirrored.</small></td></tr>'}
+    </tbody></table></div>
+  `;
+  dialog.showModal();
+}
+
 document.addEventListener("submit", async (event) => {
   event.preventDefault();
   const values = data(event.target);
@@ -971,12 +1124,15 @@ document.addEventListener("click", async (event) => {
   if (!button) return;
   if (button.dataset.page) {
     page = button.dataset.page;
-    if (page === "security") location.hash = "security";
-    else if (location.hash) history.replaceState(null, "", location.pathname);
+    history.replaceState(null, "", `#${page}`);
     render();
   }
   if (button.id === "logout") { await api("/api/logout", { method: "POST" }); location.reload(); }
-  if (button.dataset.generateCompanyWallet !== undefined && confirm("Generate the initial company wallet? Store the private key securely after revealing it from the dashboard.")) {
+  if (button.dataset.generateCompanyWallet !== undefined && await askConfirm({
+    title: "Generate company wallet",
+    message: "Generate the initial company wallet? Store the private key securely after revealing it from the dashboard.",
+    confirmText: "Generate"
+  })) {
     mutate("/api/company-wallets/generate-initial", "POST");
   }
   if (button.dataset.revealCompanyKey) {
@@ -996,26 +1152,35 @@ document.addEventListener("click", async (event) => {
     $("#company-key-dialog").querySelector("[name=company_private_key]").value = "";
     $("#company-key-dialog").close();
   }
-  if (button.dataset.archiveDomain && confirm("Archive this domain?")) mutate(`/api/domains/${button.dataset.archiveDomain}/archive`, "POST");
-  if (button.dataset.restoreDomain && confirm("Restore this domain to the active list?")) mutate(`/api/domains/${button.dataset.restoreDomain}`, "PUT", { status: "pool" });
-  if (button.dataset.deleteDomain && confirm("Permanently delete this domain? Domains with website history must be archived instead.")) mutate(`/api/domains/${button.dataset.deleteDomain}`, "DELETE");
+  if (button.dataset.archiveDomain && await askConfirm({ title: "Archive domain", message: "Archive this domain?", confirmText: "Archive" })) mutate(`/api/domains/${button.dataset.archiveDomain}/archive`, "POST");
+  if (button.dataset.restoreDomain && await askConfirm({ title: "Restore domain", message: "Restore this domain to the active list?", confirmText: "Restore" })) mutate(`/api/domains/${button.dataset.restoreDomain}`, "PUT", { status: "pool" });
+  if (button.dataset.deleteDomain && await askConfirm({ title: "Delete domain", message: "Permanently delete this domain? Domains with website history must be archived instead.", confirmText: "Delete", danger: true })) mutate(`/api/domains/${button.dataset.deleteDomain}`, "DELETE");
   if (button.dataset.editDomain) openDomainEditDialog(button.dataset.editDomain);
   if (button.dataset.editDomainGroup) openDomainGroupDialog(button.dataset.editDomainGroup);
   if (button.dataset.domainMode) { domainMode = button.dataset.domainMode; render(); }
-  if (button.dataset.archiveWebsite && confirm("Archive this website and domain?")) mutate(`/api/websites/${button.dataset.archiveWebsite}`, "DELETE");
-  if (button.dataset.releaseDomain && confirm("Return this archived domain to the assignment pool? Its existing website history will be preserved.")) mutate(`/api/websites/${button.dataset.releaseDomain}/release-domain`, "POST");
-  if (button.dataset.archiveManager && confirm("Archive this manager?")) mutate(`/api/managers/${button.dataset.archiveManager}`, "DELETE");
-  if (button.dataset.archiveTeam && confirm("Archive this team?")) mutate(`/api/teams/${button.dataset.archiveTeam}`, "PUT", { active: false });
-  if (button.dataset.archiveWallet && confirm("Archive this revenue wallet? Existing website assignments will remain active until changed.")) mutate(`/api/wallets/${button.dataset.archiveWallet}`, "DELETE");
-  if (button.dataset.restoreWallet && confirm("Restore this revenue wallet to the active list?")) mutate(`/api/wallets/${button.dataset.restoreWallet}`, "PUT", { active: true });
+  if (button.dataset.archiveWebsite && await askConfirm({ title: "Archive website", message: "Archive this website and domain?", confirmText: "Archive" })) mutate(`/api/websites/${button.dataset.archiveWebsite}`, "DELETE");
+  if (button.dataset.releaseDomain && await askConfirm({ title: "Return domain", message: "Return this archived domain to the assignment pool? Its existing website history will be preserved.", confirmText: "Return to pool" })) mutate(`/api/websites/${button.dataset.releaseDomain}/release-domain`, "POST");
+  if (button.dataset.archiveManager && await askConfirm({ title: "Archive manager", message: "Archive this manager?", confirmText: "Archive" })) mutate(`/api/managers/${button.dataset.archiveManager}`, "DELETE");
+  if (button.dataset.archiveTeam && await askConfirm({ title: "Archive team", message: "Archive this team?", confirmText: "Archive" })) mutate(`/api/teams/${button.dataset.archiveTeam}`, "PUT", { active: false });
+  if (button.dataset.archiveWallet && await askConfirm({ title: "Archive revenue wallet", message: "Archive this revenue wallet? Existing website assignments will remain active until changed.", confirmText: "Archive" })) mutate(`/api/wallets/${button.dataset.archiveWallet}`, "DELETE");
+  if (button.dataset.restoreWallet && await askConfirm({ title: "Restore revenue wallet", message: "Restore this revenue wallet to the active list?", confirmText: "Restore" })) mutate(`/api/wallets/${button.dataset.restoreWallet}`, "PUT", { active: true });
   if (button.dataset.editWallet) openWalletEditDialog(button.dataset.editWallet);
   if (button.dataset.editWalletGroup) openWalletGroupDialog(button.dataset.editWalletGroup);
   if (button.dataset.exportPrivateKey) openPrivateKeyDialog(button.dataset.exportPrivateKey);
   if (button.dataset.walletMode) { walletMode = button.dataset.walletMode; render(); }
-  if (button.dataset.requestReconciliation !== undefined && confirm("Run the normal guarded Privacy Cash reconciliation now? Existing pauses, thresholds, locks, and idempotency checks remain enforced.")) {
+  if (button.dataset.requestReconciliation !== undefined && await askConfirm({
+    title: "Run Privacy Cash reconciliation",
+    message: "Run the normal guarded Privacy Cash reconciliation now? Existing pauses, thresholds, locks, and idempotency checks remain enforced.",
+    confirmText: "Run"
+  })) {
     mutate("/api/reconciliation-requests", "POST");
   }
-  if (button.dataset.revokeAllSessions !== undefined && confirm("Revoke every dashboard session, including this browser?")) {
+  if (button.dataset.revokeAllSessions !== undefined && await askConfirm({
+    title: "Revoke all sessions",
+    message: "Revoke every dashboard session, including this browser?",
+    confirmText: "Revoke",
+    danger: true
+  })) {
     try {
       await api("/api/sessions/revoke-all", { method: "POST" });
       location.reload();
@@ -1038,11 +1203,17 @@ document.addEventListener("click", async (event) => {
   if (button.id === "domain-edit-cancel") $("#domain-edit-dialog").close();
   if (button.id === "domain-group-cancel") $("#domain-group-dialog").close();
   if (button.dataset.testRoute) mutate(`/api/notification-routes/${button.dataset.testRoute}/test`, "POST");
-  if (button.dataset.deleteRoute && confirm("Remove this webhook route?")) mutate(`/api/notification-routes/${button.dataset.deleteRoute}`, "DELETE");
-  if (button.dataset.approveManagerWallet && confirm("Approve this manager payout wallet?")) mutate(`/api/manager-wallet-requests/${button.dataset.approveManagerWallet}/approved`, "POST");
-  if (button.dataset.rejectManagerWallet && confirm("Reject this manager payout wallet?")) mutate(`/api/manager-wallet-requests/${button.dataset.rejectManagerWallet}/rejected`, "POST");
+  if (button.dataset.deleteRoute && await askConfirm({ title: "Remove webhook route", message: "Remove this webhook route?", confirmText: "Remove", danger: true })) mutate(`/api/notification-routes/${button.dataset.deleteRoute}`, "DELETE");
+  if (button.dataset.approveManagerWallet && await askConfirm({ title: "Approve manager wallet", message: "Approve this manager payout wallet?", confirmText: "Approve" })) mutate(`/api/manager-wallet-requests/${button.dataset.approveManagerWallet}/approved`, "POST");
+  if (button.dataset.rejectManagerWallet && await askConfirm({ title: "Reject manager wallet", message: "Reject this manager payout wallet?", confirmText: "Reject", danger: true })) mutate(`/api/manager-wallet-requests/${button.dataset.rejectManagerWallet}/rejected`, "POST");
   if (button.dataset.teamWallet) {
-    const wallet = prompt("Request a new manager payout wallet for this team:");
+    const wallet = await askText({
+      title: "Request manager wallet update",
+      message: "Request a new manager payout wallet for this team.",
+      label: "New Solana wallet",
+      submitText: "Request",
+      required: true
+    });
     if (wallet) mutate(`/api/teams/${button.dataset.teamWallet}`, "PUT", { manager_wallet_address: wallet });
   }
   if (button.dataset.assignManager) openAssignManagerDialog(button.dataset.assignManager);
@@ -1050,31 +1221,94 @@ document.addEventListener("click", async (event) => {
   if (button.dataset.removeManager) {
     const team = state.teams.find(t => t.id === button.dataset.removeManager);
     const rows = (team.team_managers || []).map(item => `${item.managers?.display_name}: ${item.manager_id}`).join("\n");
-    const manager_id = prompt(`Paste the manager ID to remove:\n\n${rows}`);
+    const manager_id = await askText({
+      title: "Remove manager",
+      message: rows ? `Paste the manager ID to remove:\n\n${rows}` : "This team has no mirrored manager rows.",
+      label: "Manager ID",
+      submitText: "Remove",
+      required: true
+    });
     if (manager_id) mutate(`/api/teams/${team.id}/managers/${manager_id}`, "DELETE");
   }
   if (button.dataset.teamChannel) {
     const team = state.teams.find(t => t.id === button.dataset.teamChannel);
-    const payout_discord_channel_id = prompt("Team Discord channel ID:", team.payout_discord_channel_id || "");
+    const payout_discord_channel_id = await askText({
+      title: "Edit team channel",
+      message: `Update payout channel for ${team.name}. Leave blank to clear it.`,
+      label: "Team Discord channel ID",
+      value: team.payout_discord_channel_id || "",
+      submitText: "Next"
+    });
     if (payout_discord_channel_id === null) return;
-    const payout_message = prompt("Team payout message:", team.payout_message || "");
+    const payout_message = await askText({
+      title: "Edit team payout message",
+      message: `Update the payout message for ${team.name}.`,
+      label: "Team payout message",
+      value: team.payout_message || "",
+      submitText: "Save",
+      multiline: true,
+      required: true
+    });
     if (payout_message) mutate(`/api/teams/${team.id}`, "PUT", { payout_discord_channel_id: payout_discord_channel_id || null, payout_message });
   }
   if (button.dataset.editWebsite) {
     const website = state.websites.find(w => w.id === button.dataset.editWebsite);
     const usedWalletIds = new Set(state.websites.filter(w => w.active && w.id !== website.id).map(w => w.revenue_wallet_id));
     const wallets = state.wallets.filter(w => w.active && !usedWalletIds.has(w.id)).map(w => `${w.label}: ${w.id}`).join("\n");
-    const revenue_wallet_id = prompt(`Revenue wallet ID:\n\n${wallets}`, website.revenue_wallet_id);
+    const revenue_wallet_id = await askText({
+      title: "Edit website wallet",
+      message: `Available revenue wallets:\n\n${wallets}`,
+      label: "Revenue wallet ID",
+      value: website.revenue_wallet_id,
+      submitText: "Next",
+      required: true
+    });
     if (revenue_wallet_id === null) return;
-    const threshold_usd = prompt("Threshold USD override (blank uses global):", website.threshold_usd ?? "");
+    const threshold_usd = await askText({
+      title: "Edit threshold",
+      message: "Threshold USD override. Leave blank to use the global setting.",
+      label: "Threshold USD",
+      value: website.threshold_usd ?? "",
+      submitText: "Next"
+    });
     if (threshold_usd === null) return;
-    const sol_reserve = prompt("SOL reserve override (blank uses global):", website.sol_reserve ?? "");
+    const sol_reserve = await askText({
+      title: "Edit SOL reserve",
+      message: "SOL reserve override. Leave blank to use the global setting.",
+      label: "SOL reserve",
+      value: website.sol_reserve ?? "",
+      submitText: "Next"
+    });
     if (sol_reserve === null) return;
-    const remarks = prompt("Website remarks:", website.remarks || "");
+    const remarks = await askText({
+      title: "Edit website remarks",
+      message: "Internal or launch remarks.",
+      label: "Remarks",
+      value: website.remarks || "",
+      submitText: "Save",
+      multiline: true
+    });
     if (remarks !== null) mutate(`/api/websites/${website.id}`, "PUT", {
       revenue_wallet_id, threshold_usd: optionalNumeric(threshold_usd),
       sol_reserve: optionalNumeric(sol_reserve), remarks
     });
+  }
+  if (button.dataset.expandPerformer) openPerformerDetailsDialog(button.dataset.expandPerformer);
+  if (button.id === "performer-details-close") $("#performer-details-dialog").close();
+  if (button.id === "performer-copy-wallet") {
+    const wallet = $("#performer-details-dialog").dataset.payoutWallet || "";
+    if (wallet) {
+      await navigator.clipboard.writeText(wallet);
+      notice("Performer payout wallet copied.");
+    }
+  }
+  if (button.dataset.clearAuditLog !== undefined && await askConfirm({
+    title: "Clear audit trail",
+    message: "This permanently deletes every audit-log row currently stored in the database. Future events will create new rows.",
+    confirmText: "Clear permanently",
+    danger: true
+  })) {
+    mutate("/api/audit-logs", "DELETE");
   }
 });
 
@@ -1088,6 +1322,11 @@ document.addEventListener("change", (event) => {
 
 renderNav();
 clearPasswordInputs();
+window.addEventListener("hashchange", () => {
+  page = pageFromHash();
+  if (state) render();
+  else renderNav();
+});
 window.addEventListener("pageshow", clearPasswordInputs);
 setTimeout(clearPasswordInputs, 0);
 load();

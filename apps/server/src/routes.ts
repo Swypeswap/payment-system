@@ -581,6 +581,16 @@ export async function registerRoutes(app: FastifyInstance) {
       return request;
     });
 
+    protectedApi.delete("/api/audit-logs", async () => {
+      const result = await db
+        .from("audit_logs")
+        .delete()
+        .not("id", "is", null)
+        .select("id");
+      if (result.error) throw new Error(result.error.message);
+      return { ok: true, deleted: result.data?.length ?? 0 };
+    });
+
     protectedApi.put("/api/settings", async (request) => {
       const values = z
         .object({
