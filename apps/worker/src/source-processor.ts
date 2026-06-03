@@ -50,6 +50,9 @@ const connection = new Connection(env.SOLANA_RPC_URL, "confirmed");
 const TOKEN_PROGRAM_ID = new PublicKey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA");
 const TOKEN_2022_PROGRAM_ID = new PublicKey("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb");
 const MAINNET_USDC_MINT = "EPjFWdd5AufqSSqeM2qeqBBwE72Gf9c5TxhVJ2p8Cpb";
+const SOURCE_SYNC_AUDIT_THROTTLE_MS = 10 * 60 * 1000;
+let lastSourceSyncIssueKey: string | null = null;
+let lastSourceSyncIssueAt = 0;
 
 interface TokenBalance {
   mint: string;
@@ -103,6 +106,21 @@ interface CompanyWithdrawalJob {
 
 function sol(raw: bigint | number | string) {
   return `${Number(raw) / LAMPORTS_PER_SOL} SOL`;
+}
+
+function errorMessage(error: unknown) {
+  return error instanceof Error ? error.message : String(error);
+}
+
+async function auditSourceSyncIssue(action: "source.sync_skipped" | "source.sync_failed", metadata: Record<string, unknown>) {
+  const key = `${action}:${metadata.reason ?? metadata.error ?? ""}`;
+  const now = Date.now();
+  if (lastSourceSyncIssueKey === key && now - lastSourceSyncIssueAt < SOURCE_SYNC_AUDIT_THROTTLE_MS) {
+    return;
+  }
+  lastSourceSyncIssueKey = key;
+  lastSourceSyncIssueAt = now;
+  await workerAudit(action, "source_sync", undefined, metadata);
 }
 
 function decimalAmount(raw: string | number | bigint, decimals: number) {
@@ -1410,9 +1428,26 @@ export async function expireWalletLifecycleRequests() {
 }
 
 export async function syncExternalSourceAndReconcile() {
-  if (!sourceSyncConfigured()) return;
+  if (!sourceSyncConfigured()) {
+    await auditSourceSyncIssue("source.sync_skipped", {
+      reason: "SOURCE_DATABASE_URL is not configured for the worker"
+    });
+    return;
+  }
   const settings = await loadSettings();
-  if (!settings.source_sync_enabled) return;
-  await syncExternalSource();
-  await reconcileExternalRevenueWallets();
+  if (!settings.source_sync_enabled) {
+    await auditSourceSyncIssue("source.sync_skipped", {
+      reason: "External Telegram sync is disabled in dashboard settings"
+    });
+    return;
+  }
+  try {
+    await syncExternalSource();
+    await reconcileExternalRevenueWallets();
+  } catch (error) {
+    await auditSourceSyncIssue("source.sync_failed", {
+      error: errorMessage(error)
+    });
+    throw error;
+  }
 }

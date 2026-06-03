@@ -46,7 +46,7 @@ function sourcePool() {
     connection.search = "";
     pool = new Pool({
       connectionString: connection.toString(),
-      max: 2,
+      max: 1,
       connectionTimeoutMillis: 10_000,
       idleTimeoutMillis: 30_000,
       ssl: { rejectUnauthorized: env.SOURCE_DATABASE_SSL_REJECT_UNAUTHORIZED }
@@ -103,38 +103,36 @@ export async function loadCurrentPerformerConfig(
 
 export async function syncExternalSource() {
   if (!sourceSyncConfigured()) return;
-  const [sites, performers] = await Promise.all([
-    querySource<SourceSite>(
-      `select
-         id,
-         domain,
-         intermediate_wallet,
-         created_at,
-         updated_at,
-         status,
-         performer_id,
-         is_promo_site,
-         wallet_auto_generated,
-         intermediate_private_key_encrypted,
-         intermediate_key_encrypted_at
-       from public.sites
-       where intermediate_wallet is not null
-         and intermediate_private_key_encrypted is not null`
-    ),
-    querySource<SourcePerformer>(
-      `select
-         p.telegram_user_id,
-         p.telegram_username,
-         p.payout_wallet,
-         p.created_at,
-         p.updated_at,
-         a.commission_pct,
-         a.approved_at
-       from public.performers p
-       left join public.approved_performers a
-         on a.telegram_user_id = p.telegram_user_id`
-    )
-  ]);
+  const sites = await querySource<SourceSite>(
+    `select
+       id,
+       domain,
+       intermediate_wallet,
+       created_at,
+       updated_at,
+       status,
+       performer_id,
+       is_promo_site,
+       wallet_auto_generated,
+       intermediate_private_key_encrypted,
+       intermediate_key_encrypted_at
+     from public.sites
+     where intermediate_wallet is not null
+       and intermediate_private_key_encrypted is not null`
+  );
+  const performers = await querySource<SourcePerformer>(
+    `select
+       p.telegram_user_id,
+       p.telegram_username,
+       p.payout_wallet,
+       p.created_at,
+       p.updated_at,
+       a.commission_pct,
+       a.approved_at
+     from public.performers p
+     left join public.approved_performers a
+       on a.telegram_user_id = p.telegram_user_id`
+  );
 
   const seenSiteIds = sites.map((site) => site.id);
   const now = new Date().toISOString();

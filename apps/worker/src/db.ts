@@ -44,7 +44,10 @@ export async function reportWorkerHeartbeat() {
         dry_run: env.DRY_RUN,
         reconcile_interval_ms: env.RECONCILE_INTERVAL_MS,
         event_interval_ms: env.EVENT_INTERVAL_MS,
-        privacy_cash_interval_ms: env.PRIVACY_CASH_INTERVAL_MS
+        privacy_cash_interval_ms: env.PRIVACY_CASH_INTERVAL_MS,
+        source_database_configured: Boolean(env.SOURCE_DATABASE_URL),
+        source_intermediate_key_configured: Boolean(env.SOURCE_INTERMEDIATE_WALLET_ENCRYPTION_KEY),
+        source_sync_interval_ms: env.SOURCE_SYNC_INTERVAL_MS
       }
     }, { onConflict: "worker_id" });
   if (error) throw new Error(error.message);

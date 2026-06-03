@@ -142,6 +142,7 @@ function payoutReadinessPanel() {
 function operationsHealthPanel() {
   const h = state.operations.health;
   const worker = h.worker;
+  const source = h.source_sync || {};
   return `<article class="card"><h3>Operations health</h3>
     <div class="metric-grid">
       <div><strong>${worker?.online ? "Online" : "Offline"}</strong><small>Worker heartbeat</small><small>${worker ? date(worker.last_seen_at) : "No heartbeat yet"}</small></div>
@@ -152,6 +153,26 @@ function operationsHealthPanel() {
       <div><strong>${h.last_helius_event ? date(h.last_helius_event.created_at) : "-"}</strong><small>Last Helius event</small></div>
       <div><strong>${h.last_successful_swap ? date(h.last_successful_swap.updated_at) : "-"}</strong><small>Last successful swap</small></div>
       <div><strong>${h.latest_manual_reconciliation ? esc(h.latest_manual_reconciliation.status) : "-"}</strong><small>Latest manual reconciliation</small></div>
+      <div><strong>${esc(source.mirrored_wallets ?? 0)}</strong><small>Mirrored source wallets</small><small>${source.latest_completed ? date(source.latest_completed.created_at) : "No source sync yet"}</small></div>
+    </div>
+  </article>`;
+}
+
+function sourceSyncDiagnosticsPanel() {
+  const source = state.operations.health.source_sync || {};
+  const completed = source.latest_completed;
+  const issue = source.latest_issue;
+  const issueText = issue?.metadata?.error || issue?.metadata?.reason || issue?.action || "";
+  const completedMeta = completed?.metadata || {};
+  return `<article class="card full"><h3>Source sync diagnostics</h3>
+    <div class="metric-grid">
+      <div><strong>${source.enabled ? "Enabled" : "Disabled"}</strong><small>Dashboard source sync setting</small></div>
+      <div><strong>${source.worker_source_database_configured ? "Configured" : "Missing"}</strong><small>Worker SOURCE_DATABASE_URL</small></div>
+      <div><strong>${source.worker_source_intermediate_key_configured ? "Configured" : "Missing"}</strong><small>Worker source decrypt key</small></div>
+      <div><strong>${source.interval_ms ? `${esc(source.interval_ms)} ms` : "-"}</strong><small>Worker sync interval</small></div>
+      <div><strong>${esc(source.active_wallets ?? 0)} / ${esc(source.mirrored_wallets ?? 0)}</strong><small>Active mirrored wallets</small></div>
+      <div><strong>${completed ? date(completed.created_at) : "-"}</strong><small>Latest successful source sync</small><small>${completed ? `${esc(completedMeta.site_count ?? 0)} sites, ${esc(completedMeta.performer_count ?? 0)} performers` : "No success recorded yet"}</small></div>
+      <div><strong>${issue ? date(issue.created_at) : "-"}</strong><small>Latest source sync issue</small><small>${issueText ? esc(issueText) : "No issue recorded"}</small></div>
     </div>
   </article>`;
 }
@@ -495,6 +516,7 @@ function overview() {
 
 function revenue() {
   return `<div class="grid two">
+    ${sourceSyncDiagnosticsPanel()}
     <article class="card full"><h3>Mirrored revenue wallets</h3>
       <p><small>Read-only mirror of Telegram-managed sites. Private keys are stored encrypted for the worker only and are never displayed or exportable.</small></p>
       <div class="table-wrap"><table><thead><tr><th>Domain</th><th>Public wallet</th><th>Performer</th><th>Status</th><th>Balance</th><th>Last seen</th></tr></thead><tbody>

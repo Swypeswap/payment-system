@@ -150,6 +150,10 @@ async function loadOperationsDashboard(
     payoutReviews,
     failedChainEvents,
     failedSwaps,
+    sourceRevenueWalletCount,
+    activeSourceRevenueWalletCount,
+    latestSourceCompleted,
+    latestSourceIssue,
     sessions
   ] = await Promise.all([
     firstRow(db.from("worker_heartbeats").select("*").order("last_seen_at", { ascending: false }).limit(1)),
@@ -165,6 +169,10 @@ async function loadOperationsDashboard(
     countRows(db.from("privacy_cash_payout_batches").select("id", { count: "exact", head: true }).eq("status", "review_required")),
     countRows(db.from("chain_events").select("id", { count: "exact", head: true }).eq("status", "failed")),
     countRows(db.from("swap_attempts").select("id", { count: "exact", head: true }).eq("status", "failed")),
+    countRows(db.from("external_revenue_wallets").select("id", { count: "exact", head: true })),
+    countRows(db.from("external_revenue_wallets").select("id", { count: "exact", head: true }).eq("mirror_status", "active")),
+    firstRow(db.from("audit_logs").select("action,created_at,metadata").eq("action", "source.sync_completed").order("created_at", { ascending: false }).limit(1)),
+    firstRow(db.from("audit_logs").select("action,created_at,metadata").in("action", ["source.sync_skipped", "source.sync_failed"]).order("created_at", { ascending: false }).limit(1)),
     listActiveSessions()
   ]);
   if (latestSnapshots.error) throw new Error(latestSnapshots.error.message);
@@ -225,7 +233,17 @@ async function loadOperationsDashboard(
       pending_payout_legs: openWithdrawals,
       delayed_withdrawals_awaiting_release: delayedWithdrawals,
       failed_jobs: shieldReviews + withdrawalReviews + payoutReviews + failedChainEvents + failedSwaps,
-      latest_manual_reconciliation: latestManualRequest
+      latest_manual_reconciliation: latestManualRequest,
+      source_sync: {
+        enabled: settings.source_sync_enabled === true,
+        worker_source_database_configured: workerMetadata.source_database_configured === true,
+        worker_source_intermediate_key_configured: workerMetadata.source_intermediate_key_configured === true,
+        interval_ms: workerMetadata.source_sync_interval_ms ?? null,
+        mirrored_wallets: sourceRevenueWalletCount,
+        active_wallets: activeSourceRevenueWalletCount,
+        latest_completed: latestSourceCompleted,
+        latest_issue: latestSourceIssue
+      }
     },
     sessions
   };
