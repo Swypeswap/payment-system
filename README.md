@@ -5,9 +5,9 @@ A protected dashboard, Discord bot, and payout worker for Telegram-managed websi
 The current payout flow is:
 
 1. The in-house Telegram system creates and owns each website record.
-2. This platform mirrors Telegram `sites`, `performers`, and `approved_performers` through a read-only Postgres role.
-3. When a mirrored revenue wallet receives SOL, USDC, or SPL tokens, the worker sells safe SPL/USDC balances to SOL and immediately splits native SOL between the performer and company wallet using the latest approved commission percent.
-4. When the active company wallet reaches the configured USD threshold, it deposits to Privacy Cash and releases randomized delayed owner payouts as 33/33/34.
+2. This platform mirrors Telegram `sites`, `performers`, `approved_performers`, and `performer_referrals` through a read-only Postgres role.
+3. When a mirrored revenue wallet receives SOL, USDC, or SPL tokens, the worker sells safe SPL/USDC balances to SOL. It then pays 75% to the performer and 25% to the company when there is no referral, or 75% to the performer, 5% to the approved referrer, and 20% to the company when a referral is linked.
+4. When the active company wallet reaches the configured USD threshold, it deposits to Privacy Cash and releases randomized delayed payouts to two through five owners using the configured percentages. Active owner percentages must total exactly 100%.
 
 ## Safety Defaults
 
@@ -33,7 +33,8 @@ The checked-in defaults do not move money:
 - Suspicious, unpriced, unroutable, or high-impact tokens are quarantined instead of swapped.
 - Privacy Cash starts disabled and only runs on Solana mainnet after every kill switch allows it.
 - Every guarded SPL conversion, including USDC, settles to native SOL before performer/company splitting.
-- Company funds only enter Privacy Cash after the company wallet threshold is reached. Owner payouts are split into delayed randomized SOL legs. Interrupted private withdrawals require manual review and are never retried blindly.
+- Company funds only enter Privacy Cash after the company wallet threshold is reached. Two through five owners receive their exact configured net percentages in delayed randomized SOL legs. Interrupted private withdrawals require manual review and are never retried blindly.
+- A site's revenue wallet remains mirrored while its `sites` row exists, even when the source status is offline. It becomes retired only after the row disappears from the source database.
 - Retired mirrored revenue-wallet keys can be erased only after the wallet is empty for three continuous days and one owner confirms the one-time Discord action. Public address tombstones remain monitored.
 
 Custom vanity wallets work normally as long as they are valid on-curve Solana public keys.
@@ -98,15 +99,28 @@ grant select (
   telegram_username,
   payout_wallet,
   created_at,
-  updated_at
+  updated_at,
+  customer_id,
+  referral_code,
+  referred_by_performer_id,
+  referral_code_used,
+  lifetime_volume_usd,
+  lifetime_connects,
+  lifetime_hits
 ) on public.performers to payment_sync_reader;
 
 grant select (
-  telegram_user_id,
-  telegram_username,
-  commission_pct,
-  approved_at
+  telegram_user_id
 ) on public.approved_performers to payment_sync_reader;
+
+grant select (
+  referred_performer_id,
+  referrer_performer_id,
+  referral_code_used,
+  referral_commission_pct,
+  referred_username_at_launch,
+  referrer_username_at_launch
+) on public.performer_referrals to payment_sync_reader;
 ```
 
 Put the read-only pooler URL in Ubuntu `.env` as `SOURCE_DATABASE_URL`. Use the source wallet decryption key from the Telegram system as `SOURCE_INTERMEDIATE_WALLET_ENCRYPTION_KEY`.
@@ -249,7 +263,7 @@ Open `https://YOUR_DASHBOARD_DOMAIN` and sign in with the generated password.
 In the dashboard:
 
 1. Add each Discord webhook route separately. Deposit, swap, split, company threshold, Privacy Cash, wallet lifecycle, security, and worker-error notifications can all use different webhooks and independent `@everyone` settings.
-2. Add exactly three active owner profiles with Discord IDs and Solana wallets.
+2. Add between two and five active owner profiles with Discord IDs, Solana wallets, and payout percentages totaling exactly 100%.
 3. Set the owners Discord server and notification channel.
 4. Open **Company** and generate the initial company wallet. Reveal/copy the private key only after password re-entry, then store it securely offline.
 5. Confirm `SOURCE_DATABASE_URL` and `SOURCE_INTERMEDIATE_WALLET_ENCRYPTION_KEY` are present only for the worker.
@@ -266,8 +280,8 @@ Complete this checklist on devnet:
 3. The mirrored revenue wallet count matches the Telegram `sites` table rows that have a wallet and encrypted key.
 4. A test deposit creates a separate deposit notification.
 5. A safe SPL or USDC balance creates a separate swap notification and settles to SOL.
-6. The performer/company split notification uses the latest `approved_performers.commission_pct` and `performers.payout_wallet`.
-7. If a performer is missing approval, commission, or wallet, processing stops and creates a review-required notification.
+6. The split notification pays 75% to the performer and, when present, 5% to the approved referrer; the company receives the remaining 25% or 20% before transaction fees.
+7. If a performer or linked referrer is missing approval or a payout wallet, processing stops and creates a review-required notification.
 8. When the company threshold is reached, a company Privacy Cash shield job and randomized owner withdrawal legs are created in dry-run mode.
 9. Restarting `worker` does not duplicate deposits, swaps, splits, lifecycle requests, or payout legs.
 10. Emergency pause prevents swaps, splits, and Privacy Cash movement.
@@ -309,6 +323,8 @@ docker compose exec worker npm run register:discord
 The worker syncs the Telegram source database according to `SOURCE_SYNC_INTERVAL_MS`, reconciles company Privacy Cash according to `RECONCILE_INTERVAL_MS`, and polls durable manual reconciliation requests. The dashboard shows mirrored revenue wallets, company-wallet status, Privacy Cash jobs, review-required items, active sessions, worker heartbeat, last Helius event, queue depth, review-required jobs, and delayed withdrawal count.
 
 Review [`SECURITY.md`](./SECURITY.md) before enabling mainnet transfers.
+
+For a server move, follow [`docs/NEW_VPS_DEPLOYMENT.md`](./docs/NEW_VPS_DEPLOYMENT.md). For a Telegram Supabase project change, follow [`docs/SOURCE_DATABASE_RELINK.md`](./docs/SOURCE_DATABASE_RELINK.md).
 
 The worker intentionally installs dependencies with `--ignore-scripts`. Do not remove that flag: it keeps the optional vulnerable `bigint-buffer` native binding disabled and forces the guarded pure-JavaScript fallback.
 

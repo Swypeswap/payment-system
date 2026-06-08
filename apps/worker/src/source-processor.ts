@@ -99,7 +99,7 @@ interface CompanyWithdrawalJob {
   id: string;
   payout_batch_id: string;
   company_wallet_id: string;
-  recipient_kind: "owner_1" | "owner_2" | "owner_3";
+  recipient_kind: `owner_${number}`;
   recipient_wallet_address: string;
   net_raw: string | number;
 }
@@ -557,18 +557,46 @@ async function splitRevenueSol(
   solUsdPrice: number | null
 ) {
   const performer = await loadCurrentPerformerConfig(wallet.external_performer_id);
-  if (!performer?.approved || !performer.payoutWallet || performer.commissionPct === null) {
+  if (
+    !performer?.approved ||
+    !performer.payoutWallet ||
+    performer.commissionPct !== 75
+  ) {
     return createReviewItem({
       wallet,
       walletKind: "external_revenue",
       reasonKey: `performer-invalid:${wallet.external_performer_id ?? "missing"}`,
-      message: "Performer approval, payout wallet, or commission is missing",
+      message: "Performer approval or payout wallet is missing, or the performer share is not 75%",
       metadata: { performerId: wallet.external_performer_id },
       routeKind: "performer_configuration_invalid",
       severity: "high"
     });
   }
   const performerWallet = validateSolanaWalletAddress(performer.payoutWallet);
+  const hasReferral = performer.referredByPerformerId !== null;
+  let referrerWallet: string | null = null;
+  if (hasReferral) {
+    if (
+      performer.referralCommissionPct !== 5 ||
+      !performer.referrerApproved ||
+      !performer.referrerPayoutWallet
+    ) {
+      return createReviewItem({
+        wallet,
+        walletKind: "external_revenue",
+        reasonKey: `referrer-invalid:${performer.referredByPerformerId}`,
+        message: "Referral is linked but the approved referrer, payout wallet, or 5% referral share is invalid",
+        metadata: {
+          performerId: performer.telegramUserId,
+          referrerId: performer.referredByPerformerId,
+          referralCommissionPct: performer.referralCommissionPct
+        },
+        routeKind: "performer_configuration_invalid",
+        severity: "high"
+      });
+    }
+    referrerWallet = validateSolanaWalletAddress(performer.referrerPayoutWallet);
+  }
   const companyWallet = await activeCompanyWallet();
   if (!companyWallet) {
     return createReviewItem({
@@ -588,7 +616,10 @@ async function splitRevenueSol(
   if (spendableUsd !== null && spendableUsd < Number(settings.revenue_dust_threshold_usd)) return;
 
   const performerLamports = percentLamports(spendable, performer.commissionPct);
+  const referrerLamports = hasReferral ? percentLamports(spendable, 5) : 0n;
+  const companyPct = hasReferral ? 20 : 25;
   if (performerLamports <= 0n) return;
+  if (hasReferral && referrerLamports <= 0n) return;
   const transaction = new Transaction();
   transaction.add(
     SystemProgram.transfer({
@@ -597,11 +628,21 @@ async function splitRevenueSol(
       lamports: toSafeLamports(performerLamports)
     })
   );
+  if (referrerWallet && referrerLamports > 0n) {
+    transaction.add(
+      SystemProgram.transfer({
+        fromPubkey: signer.publicKey,
+        toPubkey: new PublicKey(referrerWallet),
+        lamports: toSafeLamports(referrerLamports)
+      })
+    );
+  }
   const latest = await connection.getLatestBlockhash("confirmed");
   transaction.recentBlockhash = latest.blockhash;
   transaction.feePayer = signer.publicKey;
   const fee = BigInt((await connection.getFeeForMessage(transaction.compileMessage(), "confirmed")).value ?? PAYOUT_FEE_BUFFER_LAMPORTS);
-  const companyLamports = sourceBalanceLamports - reserveLamports - performerLamports - fee;
+  const companyLamports =
+    sourceBalanceLamports - reserveLamports - performerLamports - referrerLamports - fee;
   if (companyLamports <= 0n) return;
   transaction.add(
     SystemProgram.transfer({
@@ -611,7 +652,8 @@ async function splitRevenueSol(
     })
   );
   const finalFee = BigInt((await connection.getFeeForMessage(transaction.compileMessage(), "confirmed")).value ?? Number(fee));
-  const finalCompanyLamports = sourceBalanceLamports - reserveLamports - performerLamports - finalFee;
+  const finalCompanyLamports =
+    sourceBalanceLamports - reserveLamports - performerLamports - referrerLamports - finalFee;
   if (finalCompanyLamports <= 0n) return;
   transaction.instructions.pop();
   transaction.add(
@@ -626,7 +668,9 @@ async function splitRevenueSol(
     ? transaction.signatures[0]?.signature?.toString("hex") ?? randomUUID()
     : randomUUID();
   const idempotencyKey = createHash("sha256")
-    .update(`source-split:${wallet.id}:${sourceBalanceLamports}:${performerWallet}:${performer.commissionPct}:${companyWallet.id}`)
+    .update(
+      `source-split:${wallet.id}:${sourceBalanceLamports}:${performerWallet}:75:${referrerWallet ?? "none"}:${hasReferral ? 5 : 0}:${companyWallet.id}`
+    )
     .digest("hex");
   const estimatedCompanyUsd = solUsdPrice === null ? null : Number(finalCompanyLamports) / LAMPORTS_PER_SOL * solUsdPrice;
   const attempt = unwrap(
@@ -638,11 +682,16 @@ async function splitRevenueSol(
         idempotency_key: idempotencyKey,
         performer_telegram_user_id: performer.telegramUserId,
         performer_wallet_address: performerWallet,
-        commission_pct: performer.commissionPct,
+        commission_pct: 75,
+        company_pct: companyPct,
+        referrer_telegram_user_id: performer.referredByPerformerId,
+        referrer_wallet_address: referrerWallet,
+        referral_pct: hasReferral ? 5 : null,
         source_balance_lamports: sourceBalanceLamports.toString(),
         reserve_lamports: reserveLamports.toString(),
         fee_lamports: finalFee.toString(),
         performer_lamports: performerLamports.toString(),
+        referrer_lamports: referrerLamports.toString(),
         company_lamports: finalCompanyLamports.toString(),
         estimated_company_usd: estimatedCompanyUsd,
         raw_transaction_base64: Buffer.from(transaction.serialize()).toString("base64"),
@@ -716,8 +765,12 @@ async function splitRevenueSol(
       color: 0x64f5b5,
       fields: [
         { name: "Domain", value: wallet.domain },
-        { name: "Performer", value: `${sol(performerLamports)} (${performer.commissionPct}%)` },
-        { name: "Company", value: sol(finalCompanyLamports) },
+        { name: "Performer", value: `${sol(performerLamports)} (75%)` },
+        ...(hasReferral ? [{
+          name: "Referrer",
+          value: `${sol(referrerLamports)} (5%) to ${performer.referrerUsername ? `@${performer.referrerUsername}` : performer.referredByPerformerId}`
+        }] : []),
+        { name: "Company", value: `${sol(finalCompanyLamports)} (${companyPct}% before transaction fees)` },
         { name: "Signature", value: txSignature }
       ]
     }]
@@ -930,12 +983,30 @@ export async function processSourceChainEvent(event: { id: string; payload: Reco
 async function loadOwners() {
   const owners = unwrap(
     await db.from("owner_profiles").select("*").eq("active", true).order("created_at")
-  ) as Array<{ id: string; display_name: string; discord_user_id: string; solana_wallet_address: string | null }>;
-  if (owners.length !== 3 || owners.some((owner) => !owner.solana_wallet_address)) {
-    throw new Error("Configure exactly three active owner profiles with Solana wallets");
+  ) as Array<{
+    id: string;
+    display_name: string;
+    discord_user_id: string;
+    solana_wallet_address: string | null;
+    payout_percent: string | number;
+  }>;
+  if (
+    owners.length < 2 ||
+    owners.length > 5 ||
+    owners.some((owner) => !owner.solana_wallet_address || Number(owner.payout_percent) <= 0)
+  ) {
+    throw new Error("Configure between two and five active owners with wallets and positive payout percentages");
+  }
+  const totalPercentageUnits = owners.reduce(
+    (total, owner) => total + Math.round(Number(owner.payout_percent) * 10_000),
+    0
+  );
+  if (totalPercentageUnits !== 1_000_000) {
+    throw new Error("Active owner payout percentages must total exactly 100%");
   }
   return owners.map((owner) => ({
     ...owner,
+    payout_percent: Number(owner.payout_percent),
     solana_wallet_address: validateSolanaWalletAddress(owner.solana_wallet_address ?? "")
   }));
 }
@@ -992,7 +1063,8 @@ async function planCompanyOwnerPayout(
     plan = planOwnerPrivacyCashDistribution(
       BigInt(shieldJob.shield_raw),
       feeConfig,
-      [randomLegWeights(), randomLegWeights(), randomLegWeights()]
+      owners.map((owner) => owner.payout_percent),
+      owners.map(() => randomLegWeights())
     );
     if (plan.withdrawals.every((withdrawal) =>
       withdrawal.netLamports >= BigInt(feeConfig.minimumWithdrawalRaw)
@@ -1073,6 +1145,7 @@ async function shieldCompanyIfEligible(
   const solUsdPrice = await getSolUsdPrice();
   const availableUsd = Number(available) / LAMPORTS_PER_SOL * solUsdPrice;
   if (availableUsd < Number(settings.company_privacy_cash_threshold_usd)) return;
+  await loadOwners();
   await sendRoute("company_threshold_reached", {
     embeds: [{
       title: "Company wallet threshold reached",
@@ -1181,6 +1254,19 @@ export async function recoverCompanyPrivacyCashShields() {
         error: "Recovered from private balance after an interrupted deposit; signature unavailable"
       }).eq("id", job.id).select("*").single()
     ) as CompanyShieldJob;
+    await planCompanyOwnerPayout(wallet, completed, "pending", settings);
+  }
+
+  const [completedJobs, existingBatches] = await Promise.all([
+    db.from("company_privacy_cash_shield_jobs").select("*").eq("status", "succeeded"),
+    db.from("company_privacy_cash_payout_batches").select("shield_job_id")
+  ]);
+  if (completedJobs.error) throw new Error(completedJobs.error.message);
+  if (existingBatches.error) throw new Error(existingBatches.error.message);
+  const plannedShieldIds = new Set(existingBatches.data.map((batch) => batch.shield_job_id));
+  for (const completed of completedJobs.data as CompanyShieldJob[]) {
+    if (plannedShieldIds.has(completed.id)) continue;
+    const wallet = await loadCompanyWallet(completed.company_wallet_id);
     await planCompanyOwnerPayout(wallet, completed, "pending", settings);
   }
 }

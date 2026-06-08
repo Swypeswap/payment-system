@@ -129,6 +129,48 @@ async function firstRow<T>(query: PromiseLike<{ data: T[] | null; error: { messa
   return result.data?.[0] ?? null;
 }
 
+function ownerAllocationState(owners: Array<Record<string, any>>) {
+  const activeOwners = owners.filter((owner) => owner.active);
+  const percentageUnits = activeOwners.reduce(
+    (total, owner) => total + Math.round(Number(owner.payout_percent ?? 0) * 10_000),
+    0
+  );
+  const configured = activeOwners.filter((owner) =>
+    owner.solana_wallet_address && Number(owner.payout_percent ?? 0) > 0
+  ).length;
+  return {
+    activeOwners,
+    configured,
+    percentageUnits,
+    ready:
+      activeOwners.length >= 2 &&
+      activeOwners.length <= 5 &&
+      configured === activeOwners.length &&
+      percentageUnits === 1_000_000
+  };
+}
+
+async function validateOwnerAllocationChange(
+  next: { id?: string; active: boolean; payout_percent: number }
+) {
+  const owners = unwrap(await db.from("owner_profiles").select("id,active,payout_percent"));
+  const proposed = owners
+    .filter((owner) => owner.id !== next.id)
+    .concat([{ id: next.id ?? "new", active: next.active, payout_percent: next.payout_percent }]);
+  const active = proposed.filter((owner) => owner.active);
+  const totalUnits = active.reduce(
+    (total, owner) => total + Math.round(Number(owner.payout_percent ?? 0) * 10_000),
+    0
+  );
+  if (active.length > 5) throw new Error("No more than five active owner profiles are allowed");
+  if (next.active && next.payout_percent <= 0) {
+    throw new Error("An active owner must have a positive payout percentage");
+  }
+  if (totalUnits > 1_000_000) {
+    throw new Error("Active owner payout percentages cannot exceed 100%");
+  }
+}
+
 async function loadOperationsDashboard(
   settings: Record<string, unknown>,
   websites: Array<Record<string, any>>,
@@ -178,7 +220,7 @@ async function loadOperationsDashboard(
   if (latestSnapshots.error) throw new Error(latestSnapshots.error.message);
 
   const hostedWebsites = websites.filter((website) => website.active && website.hosted);
-  const activeOwners = owners.filter((owner) => owner.active);
+  const ownerAllocation = ownerAllocationState(owners);
   const latestSnapshotByWebsite = new Map<string, Record<string, any>>();
   for (const snapshot of latestSnapshots.data ?? []) {
     if (!latestSnapshotByWebsite.has(snapshot.website_id)) {
@@ -205,9 +247,11 @@ async function loadOperationsDashboard(
       privacy_cash_enabled: settings.privacy_cash_enabled === true,
       hosted_websites: { ready: hostedWebsites.length > 0, count: hostedWebsites.length },
       owner_wallets: {
-        ready: activeOwners.length === 3 && activeOwners.every((owner) => owner.solana_wallet_address),
-        configured: activeOwners.filter((owner) => owner.solana_wallet_address).length,
-        required: 3
+        ready: ownerAllocation.ready,
+        configured: ownerAllocation.configured,
+        required: ownerAllocation.activeOwners.length,
+        active: ownerAllocation.activeOwners.length,
+        percentage_total: ownerAllocation.percentageUnits / 10_000
       },
       manager_wallets: {
         ready: hostedWebsites.length > 0 && hostedWebsites.every((website) => website.teams?.manager_wallet_address),
@@ -935,13 +979,15 @@ export async function registerRoutes(app: FastifyInstance) {
           display_name: z.string().trim().min(1),
           discord_user_id: z.string().regex(/^[0-9]{15,22}$/),
           discord_username: z.string().trim().optional(),
-          solana_wallet_address: z.string().optional()
+          solana_wallet_address: z.string().optional(),
+          payout_percent: percent.default(0),
+          active: z.boolean().default(true)
         })
         .parse(request.body);
-      const activeOwners = unwrap(
-        await db.from("owner_profiles").select("id").eq("active", true)
-      );
-      if (activeOwners.length >= 3) throw new Error("Only three active owner profiles are allowed");
+      await validateOwnerAllocationChange({
+        active: values.active,
+        payout_percent: values.payout_percent
+      });
       const data = unwrap(
         await db
           .from("owner_profiles")
@@ -966,6 +1012,7 @@ export async function registerRoutes(app: FastifyInstance) {
           display_name: z.string().trim().min(1).optional(),
           discord_username: z.string().trim().optional(),
           solana_wallet_address: z.string().optional(),
+          payout_percent: percent.optional(),
           active: z.boolean().optional()
         })
         .parse(request.body);
@@ -975,6 +1022,11 @@ export async function registerRoutes(app: FastifyInstance) {
       const wallet = values.solana_wallet_address
         ? validateSolanaWalletAddress(values.solana_wallet_address)
         : undefined;
+      await validateOwnerAllocationChange({
+        id,
+        active: values.active ?? previous.active,
+        payout_percent: values.payout_percent ?? Number(previous.payout_percent ?? 0)
+      });
       const data = unwrap(
         await db
           .from("owner_profiles")

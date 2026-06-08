@@ -77,6 +77,11 @@ td code { color: var(--accent); font-size: 0.72rem; }
 .metric-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr)); gap: 0.65rem; }
 .metric-grid > div { display: grid; gap: 0.22rem; min-height: 5rem; padding: 0.75rem; border: 1px solid var(--line); border-radius: 0.7rem; background: rgba(7, 7, 8, 0.72); }
 .metric-grid strong { color: var(--accent); overflow-wrap: anywhere; }
+.owner-allocation-row { display: grid; grid-template-columns: minmax(10rem, 1.2fr) minmax(9rem, 0.7fr) minmax(10rem, 1fr) auto auto; gap: 0.75rem; align-items: end; padding: 0.8rem 0; border-bottom: 1px solid var(--line); }
+.owner-allocation-row > div { display: grid; gap: 0.25rem; min-width: 0; }
+.owner-allocation-row code { color: var(--accent); overflow-wrap: anywhere; }
+.owner-active-label { align-items: center; }
+.owner-add-form { margin-top: 1rem; padding-top: 1rem; border-top: 1px solid var(--line); }
 .wallet-toolbar, .wallet-group-heading, .wallet-group-summary { display: flex; align-items: center; justify-content: space-between; gap: 0.75rem; }
 .wallet-toolbar { flex-wrap: wrap; }
 .wallet-export select { min-width: 13rem; }
@@ -119,4 +124,5 @@ dialog::backdrop { background: rgba(3, 3, 4, 0.84); backdrop-filter: blur(7px); 
   nav button { text-align: center; font-size: 0.76rem; }
   .logout { margin-top: 1rem; }
   main { padding: 1rem; }
+  .owner-allocation-row { grid-template-columns: 1fr; }
 }

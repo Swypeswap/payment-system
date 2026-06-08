@@ -373,6 +373,7 @@ interface OwnerProfile {
   display_name: string;
   discord_user_id: string;
   solana_wallet_address: string | null;
+  payout_percent: string | number;
 }
 
 interface ShieldJob {
@@ -389,7 +390,7 @@ interface PrivacyCashWithdrawalJob {
   payout_batch_id: string;
   website_id: string;
   asset_key: PrivacyCashAsset;
-  recipient_kind: "owner_1" | "owner_2" | "owner_3" | "manager";
+  recipient_kind: `owner_${number}` | "manager";
   recipient_wallet_address: string;
   net_raw: string | number;
 }
@@ -412,11 +413,23 @@ async function loadOwnerProfiles() {
   const owners = unwrap(
     await db.from("owner_profiles").select("*").eq("active", true).order("created_at")
   ) as OwnerProfile[];
-  if (owners.length !== 3 || owners.some((owner) => !owner.solana_wallet_address)) {
-    throw new Error("Configure exactly three active owner profiles with Solana wallets");
+  if (
+    owners.length < 2 ||
+    owners.length > 5 ||
+    owners.some((owner) => !owner.solana_wallet_address || Number(owner.payout_percent) <= 0)
+  ) {
+    throw new Error("Configure between two and five active owners with wallets and positive payout percentages");
+  }
+  const totalPercentageUnits = owners.reduce(
+    (total, owner) => total + Math.round(Number(owner.payout_percent) * 10_000),
+    0
+  );
+  if (totalPercentageUnits !== 1_000_000) {
+    throw new Error("Active owner payout percentages must total exactly 100%");
   }
   return owners.map((owner) => ({
     ...owner,
+    payout_percent: Number(owner.payout_percent),
     solana_wallet_address: validateSolanaWalletAddress(owner.solana_wallet_address ?? "")
   }));
 }
@@ -438,7 +451,8 @@ async function planShieldedPayout(
     plan = planPrivacyCashDistribution(
       BigInt(shieldJob.shield_raw),
       feeConfig,
-      [randomLegWeights(), randomLegWeights(), randomLegWeights(), randomLegWeights()]
+      [...owners.map(() => randomLegWeights()), randomLegWeights()],
+      owners.map((owner) => owner.payout_percent)
     );
     if (plan.withdrawals.every((withdrawal) =>
       withdrawal.netLamports >= BigInt(feeConfig.minimumWithdrawalRaw)

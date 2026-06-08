@@ -98,13 +98,21 @@ test("grosses up Privacy Cash fees while preserving an exact recipient net amoun
   assert.ok(gross > net);
 });
 
-test("plans the largest exact 30/30/30/10 Privacy Cash distribution within a shield budget", () => {
+test("plans the largest exact owner-pool and manager Privacy Cash distribution within a shield budget", () => {
   const fees = { withdrawFeeRate: 0.0035, withdrawBaseFeeLamports: 6_000_000 };
   const plan = planPrivacyCashDistribution(1_000_000_000n, fees);
   const [owner1, owner2, owner3, manager] = plan.withdrawals;
-  assert.equal(owner1?.netLamports, owner2?.netLamports);
-  assert.equal(owner2?.netLamports, owner3?.netLamports);
-  assert.equal(owner1?.netLamports, (manager?.netLamports ?? 0n) * 3n);
+  const ownerPool =
+    (owner1?.netLamports ?? 0n) +
+    (owner2?.netLamports ?? 0n) +
+    (owner3?.netLamports ?? 0n);
+  assert.equal(ownerPool, (manager?.netLamports ?? 0n) * 9n);
+  assert.equal(owner1?.netLamports, ownerPool * 33n / 100n);
+  assert.equal(owner2?.netLamports, ownerPool * 33n / 100n);
+  assert.equal(
+    owner3?.netLamports,
+    ownerPool - (owner1?.netLamports ?? 0n) - (owner2?.netLamports ?? 0n)
+  );
   assert.equal(
     plan.grossDistributionLamports + plan.dustLamports,
     1_000_000_000n
@@ -123,26 +131,46 @@ test("splits each Privacy Cash entitlement into weighted legs without changing i
     plan.withdrawals
       .filter((item) => item.recipientKind === kind)
       .reduce((total, item) => total + item.netLamports, 0n);
-  assert.equal(sum("owner_1"), sum("manager") * 3n);
-  assert.equal(sum("owner_2"), sum("manager") * 3n);
-  assert.equal(sum("owner_3"), sum("manager") * 3n);
+  const ownerPool = sum("owner_1") + sum("owner_2") + sum("owner_3");
+  assert.equal(ownerPool, sum("manager") * 9n);
+  assert.equal(sum("owner_1"), ownerPool * 33n / 100n);
+  assert.equal(sum("owner_2"), ownerPool * 33n / 100n);
+  assert.equal(sum("owner_3"), ownerPool - sum("owner_1") - sum("owner_2"));
   assert.equal(plan.withdrawals.length, 9);
 });
 
-test("plans exact 33/33/34 owner-only Privacy Cash payouts with randomized legs", () => {
+test("plans configurable owner-only Privacy Cash payouts with randomized legs", () => {
   const fees = { withdrawFeeRate: 0.0035, withdrawBaseFeeLamports: 6_000_000 };
   const plan = planOwnerPrivacyCashDistribution(
     2_000_000_000n,
     fees,
-    [[8, 12], [10, 9, 11], [11, 9]]
+    [40, 25, 20, 15],
+    [[8, 12], [10, 9, 11], [11, 9], [9, 10]]
   );
   const sum = (kind: string) =>
     plan.withdrawals
       .filter((item) => item.recipientKind === kind)
       .reduce((total, item) => total + item.netLamports, 0n);
-  assert.equal(sum("owner_1"), sum("owner_2"));
-  assert.equal(sum("owner_3") * 33n, sum("owner_1") * 34n);
-  assert.equal(plan.withdrawals.length, 7);
+  const difference = (left: bigint, right: bigint) => left >= right ? left - right : right - left;
+  assert.ok(difference(sum("owner_1") * 25n, sum("owner_2") * 40n) <= 40n);
+  assert.ok(difference(sum("owner_2") * 20n, sum("owner_3") * 25n) <= 25n);
+  assert.ok(difference(sum("owner_3") * 15n, sum("owner_4") * 20n) <= 20n);
+  assert.equal(plan.withdrawals.length, 9);
+  assert.equal(
+    plan.withdrawals.reduce((total, item) => total + item.netLamports, 0n),
+    plan.netDistributionLamports
+  );
+});
+
+test("rejects owner Privacy Cash percentages that do not total 100", () => {
+  assert.throws(() =>
+    planOwnerPrivacyCashDistribution(
+      2_000_000_000n,
+      { withdrawFeeRate: 0.0035, withdrawBaseFeeLamports: 6_000_000 },
+      [50, 40],
+      [[1], [1]]
+    )
+  );
 });
 
 test("uses the configured Confetti identity for Discord webhook messages", () => {

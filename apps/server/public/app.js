@@ -233,7 +233,7 @@ function payoutReadinessPanel() {
       ${readinessLine("Guarded SPL swaps enabled", r.swaps_enabled)}
       ${readinessLine("Privacy Cash enabled", r.privacy_cash_enabled)}
       ${readinessLine("Hosted websites", r.hosted_websites.ready, `${r.hosted_websites.count} hosted`)}
-      ${readinessLine("Owner wallets", r.owner_wallets.ready, `${r.owner_wallets.configured}/${r.owner_wallets.required} configured`)}
+      ${readinessLine("Owner wallets", r.owner_wallets.ready, `${r.owner_wallets.configured}/${r.owner_wallets.required} configured, ${r.owner_wallets.percentage_total}% allocated`)}
       ${readinessLine("Manager wallets", r.manager_wallets.ready, `${r.manager_wallets.configured}/${r.manager_wallets.required} hosted teams configured`)}
       ${readinessLine("Threshold status", r.threshold_status.ready, `${r.threshold_status.reached}/${r.threshold_status.hosted} hosted wallets currently at or above threshold`)}
       <div class="health-row"><span class="chip ${r.pending_payout_legs ? "warn" : "good"}">${esc(r.pending_payout_legs)}</span><strong>Pending payout legs</strong></div>
@@ -323,7 +323,8 @@ function teams() {
     <article class="card"><h3>Add owner</h3><p><small>Each owner is linked to one Discord ID and can update only their own SOL payout wallet from the owners server.</small></p>
       <form id="owner-form" class="form-grid"><label>Name<input name="display_name" required /></label>
       <label>Discord user ID<input name="discord_user_id" required /></label><label>Discord username<input name="discord_username" /></label>
-      <label>Solana wallet<input name="solana_wallet_address" placeholder="Can be added by the owner later" /></label><button class="full">Add owner</button></form>
+      <label>Solana wallet<input name="solana_wallet_address" placeholder="Can be added by the owner later" /></label>
+      <label>Payout percentage<input name="payout_percent" type="number" min="0.0001" max="100" step="0.0001" required /></label><button class="full">Add owner</button></form>
       <div class="stack" style="margin-top:1rem">${state.owners.map(owner => `<div class="actions"><small>${esc(owner.display_name)} &middot; ${esc(owner.discord_user_id)} &middot; <code>${esc(short(owner.solana_wallet_address))}</code></small></div>`).join("") || "<small>No owner profiles yet.</small>"}</div>
       <h3 style="margin-top:1.2rem">Add manager</h3><form id="manager-form" class="form-grid">
       <label>Name<input name="display_name" required /></label><label>Discord user ID<input name="discord_user_id" required /></label>
@@ -594,6 +595,48 @@ function activeCompanyWallet() {
   return state.companyWallets.find((wallet) => wallet.status === "active");
 }
 
+function ownerAllocationTotal() {
+  return state.owners
+    .filter((owner) => owner.active)
+    .reduce((total, owner) => total + Number(owner.payout_percent || 0), 0);
+}
+
+function ownerAllocationPanel() {
+  const activeOwners = state.owners.filter((owner) => owner.active);
+  const total = ownerAllocationTotal();
+  const complete = activeOwners.length >= 2 && activeOwners.length <= 5 && Math.abs(total - 100) < 0.00005;
+  const over = total > 100.00005;
+  const statusClass = complete ? "good" : over ? "bad" : "warn";
+  const statusText = complete
+    ? "Ready for Privacy Cash payouts"
+    : over
+      ? "Over-allocated: payouts blocked"
+      : "Incomplete allocation: payouts blocked";
+  return `<article class="card full"><h3>Owner Privacy Cash allocation</h3>
+    <div class="health-row">
+      <span class="chip ${statusClass}">${total.toFixed(4).replace(/\.?0+$/, "")}% / 100%</span>
+      <strong>${statusText}</strong>
+      <small>${activeOwners.length} active owner${activeOwners.length === 1 ? "" : "s"}; minimum 2, maximum 5</small>
+    </div>
+    <p><small>Every owner receives their configured net percentage through Privacy Cash. Protocol and transaction fees remain a company expense.</small></p>
+    ${state.owners.map((owner) => `<form class="owner-allocation-row owner-allocation-form" data-owner-id="${owner.id}">
+      <div><strong>${esc(owner.display_name)}</strong><small>${esc(owner.discord_username ? `@${owner.discord_username}` : owner.discord_user_id)}</small></div>
+      <label>Payout percentage<input name="payout_percent" type="number" min="0.0001" max="100" step="0.0001" value="${esc(owner.payout_percent ?? 0)}" required /></label>
+      <div><small>Wallet</small><code>${esc(short(owner.solana_wallet_address || ""))}</code></div>
+      <label class="owner-active-label">Active <span class="toggle"><input name="active" type="checkbox" ${owner.active ? "checked" : ""}/><span class="slider"></span></span></label>
+      <button class="small ghost">Save</button>
+    </form>`).join("") || "<small>No owner profiles configured.</small>"}
+    ${state.owners.filter((owner) => owner.active).length < 5 ? `<form id="company-owner-form" class="form-grid owner-add-form">
+      <label>Name<input name="display_name" required /></label>
+      <label>Discord user ID<input name="discord_user_id" required /></label>
+      <label>Discord username<input name="discord_username" /></label>
+      <label>Solana wallet<input name="solana_wallet_address" placeholder="Owner may set this in Discord" /></label>
+      <label>Payout percentage<input name="payout_percent" type="number" min="0.0001" max="100" step="0.0001" required /></label>
+      <button>Add owner</button>
+    </form>` : '<p><small>The maximum of five active owners is configured.</small></p>'}
+  </article>`;
+}
+
 function performerFor(telegramUserId) {
   if (!telegramUserId) return null;
   return state.sourcePerformers.find((performer) =>
@@ -683,6 +726,7 @@ function company() {
       <span class="chip">High volume: ${money(state.settings.company_rotation_high_volume_usd)}</span>
       <span class="chip">Combined: ${esc(state.settings.company_rotation_short_days)} days and ${money(state.settings.company_rotation_lower_volume_usd)}</span>
     </div></article>
+    ${ownerAllocationPanel()}
     <article class="card full"><h3>Company wallet history</h3><div class="table-wrap"><table><thead><tr><th>Wallet</th><th>Status</th><th>Volume</th><th>Balance</th><th>Activated</th><th>Archived</th><th>Action</th></tr></thead><tbody>
       ${state.companyWallets.map((wallet) => `<tr>
         <td><code>${esc(short(wallet.address))}</code></td>
@@ -953,7 +997,18 @@ function openPerformerDetailsDialog(telegramUserId) {
       <div><strong>${esc(performerDisplayName(performer, telegramUserId))}</strong><small>Telegram username</small></div>
       <div><strong>${esc(telegramUserId || "-")}</strong><small>Telegram user ID</small></div>
       <div><strong>${performer?.approved ? "Approved" : "Not approved"}</strong><small>Approval status</small></div>
-      <div><strong>${performer?.commission_pct ?? "-"}</strong><small>Commission %</small></div>
+      <div><strong>${performer?.commission_pct ?? "-"}</strong><small>Performer commission %</small></div>
+      <div><strong>${esc(performer?.customer_id || "-")}</strong><small>Customer ID</small></div>
+      <div><strong>${esc(performer?.referral_code || "-")}</strong><small>Referral code</small></div>
+      <div><strong>${esc(performer?.referral_code_used || "-")}</strong><small>Referral code used</small></div>
+      <div><strong>${performer?.referred_by_performer_id ? esc(performerDisplayName({ telegram_username: performer.referrer_username }, performer.referred_by_performer_id)) : "No referrer"}</strong><small>Referrer username</small></div>
+      <div><strong>${esc(performer?.referred_by_performer_id || "-")}</strong><small>Referrer performer ID</small></div>
+      <div><strong>${performer?.referred_by_performer_id ? (performer.referrer_approved ? "Approved" : "Not approved") : "-"}</strong><small>Referrer approval</small></div>
+      <div><strong>${esc(performer?.referrer_payout_wallet || "-")}</strong><small>Referrer payout wallet</small></div>
+      <div><strong>${performer?.referral_commission_pct ?? "-"}</strong><small>Referral commission %</small></div>
+      <div><strong>${money(performer?.lifetime_volume_usd)}</strong><small>Lifetime volume</small></div>
+      <div><strong>${esc(performer?.lifetime_connects ?? "-")}</strong><small>Lifetime connects</small></div>
+      <div><strong>${esc(performer?.lifetime_hits ?? "-")}</strong><small>Lifetime hits</small></div>
       <div><strong>${date(performer?.source_updated_at)}</strong><small>Source updated</small></div>
       <div><strong>${date(performer?.synced_at)}</strong><small>Last mirrored</small></div>
     </div>
@@ -1000,7 +1055,42 @@ document.addEventListener("submit", async (event) => {
       color_label: values.color_label
     });
   }
-  if (event.target.id === "owner-form") mutate("/api/owners", "POST", Object.fromEntries(Object.entries(values).filter(([, v]) => v !== "")));
+  if (event.target.id === "owner-form") mutate("/api/owners", "POST", {
+    ...Object.fromEntries(Object.entries(values).filter(([, value]) => value !== "")),
+    payout_percent: Number(values.payout_percent),
+    active: true
+  });
+  if (event.target.id === "company-owner-form") {
+    const payoutPercent = Number(values.payout_percent);
+    if (ownerAllocationTotal() + payoutPercent > 100.00005) {
+      notice("Owner payout percentages cannot exceed 100%.", "error");
+      return;
+    }
+    mutate("/api/owners", "POST", {
+      ...Object.fromEntries(Object.entries(values).filter(([, value]) => value !== "")),
+      payout_percent: payoutPercent,
+      active: true
+    });
+  }
+  if (event.target.classList.contains("owner-allocation-form")) {
+    const ownerId = event.target.dataset.ownerId;
+    const owner = state.owners.find((item) => item.id === ownerId);
+    const active = event.target.querySelector("[name=active]").checked;
+    const payoutPercent = Number(values.payout_percent);
+    const proposedTotal = state.owners
+      .filter((item) => item.id !== ownerId && item.active)
+      .reduce((total, item) => total + Number(item.payout_percent || 0), 0) +
+      (active ? payoutPercent : 0);
+    if (proposedTotal > 100.00005) {
+      notice("Owner payout percentages cannot exceed 100%.", "error");
+      return;
+    }
+    if (active && payoutPercent <= 0) {
+      notice("An active owner needs a positive payout percentage.", "error");
+      return;
+    }
+    mutate(`/api/owners/${owner.id}`, "PUT", { payout_percent: payoutPercent, active });
+  }
   if (event.target.id === "manager-form") mutate("/api/managers", "POST", values);
   if (event.target.id === "team-form") mutate("/api/teams", "POST", Object.fromEntries(Object.entries(values).filter(([, v]) => v !== "")));
   if (event.target.id === "assign-manager-form") {
