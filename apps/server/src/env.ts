@@ -7,7 +7,6 @@ const envSchema = z.object({
   SUPABASE_URL: z.string().url(),
   SUPABASE_SERVICE_ROLE_KEY: z.string().min(20),
   MASTER_ENCRYPTION_KEY: z.string().min(40),
-  DASHBOARD_PASSWORD_HASH: z.string().min(20),
   SESSION_SECRET: z.string().min(32),
   HELIUS_WEBHOOK_AUTH: z.string().min(20),
   SUPABASE_LOG_DRAIN_AUTH: z.string().min(20).optional(),

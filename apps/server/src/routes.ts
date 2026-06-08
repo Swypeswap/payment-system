@@ -1,5 +1,4 @@
 import { createHash, timingSafeEqual } from "node:crypto";
-import bcrypt from "bcryptjs";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { Keypair } from "@solana/web3.js";
 import {
@@ -17,6 +16,7 @@ import { audit } from "./audit.js";
 import { db, unwrap } from "./db.js";
 import { env } from "./env.js";
 import { encryptWebhookUrl, listRedactedRoutes, sendWebhook } from "./notifications.js";
+import { verifyDashboardPassword } from "./password.js";
 import {
   dashboardNetworkKey,
   issueNetworkUnblockRecoveryCode,
@@ -406,7 +406,7 @@ export async function registerRoutes(app: FastifyInstance) {
       }
 
       const { password } = z.object({ password: z.string().min(1) }).parse(request.body);
-      if (!(await bcrypt.compare(password, env.DASHBOARD_PASSWORD_HASH))) {
+      if (!(await verifyDashboardPassword(password))) {
         const failures = await recordDashboardLoginFailure(networkKey, request.ip);
         const recoveryCode = failures.blocked_until
           ? await issueNetworkUnblockRecoveryCode(networkKey, failures.blocked_until)
@@ -722,7 +722,7 @@ export async function registerRoutes(app: FastifyInstance) {
       async (request) => {
         const { id } = z.object({ id: uuid }).parse(request.params);
         const { password } = z.object({ password: z.string().min(1) }).parse(request.body);
-        if (!(await bcrypt.compare(password, env.DASHBOARD_PASSWORD_HASH))) {
+        if (!(await verifyDashboardPassword(password))) {
           throw new Error("Invalid dashboard password");
         }
         const wallet = unwrap(
@@ -762,7 +762,7 @@ export async function registerRoutes(app: FastifyInstance) {
       async (request) => {
         const { id } = z.object({ id: uuid }).parse(request.params);
         const { password } = z.object({ password: z.string().min(1) }).parse(request.body);
-        if (!(await bcrypt.compare(password, env.DASHBOARD_PASSWORD_HASH))) {
+        if (!(await verifyDashboardPassword(password))) {
           throw new Error("Invalid dashboard password");
         }
         const oldWallet = unwrap(
@@ -1247,7 +1247,7 @@ export async function registerRoutes(app: FastifyInstance) {
       async (request, reply) => {
         const { id } = z.object({ id: uuid }).parse(request.params);
         const { password } = z.object({ password: z.string().min(1) }).parse(request.body);
-        const passwordMatches = await bcrypt.compare(password, env.DASHBOARD_PASSWORD_HASH);
+        const passwordMatches = await verifyDashboardPassword(password);
         if (!passwordMatches) {
           throw new Error("Invalid dashboard password");
         }

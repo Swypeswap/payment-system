@@ -19,7 +19,9 @@ Securely retain the old `.env`. The following values must remain identical on th
 - `MASTER_ENCRYPTION_KEY`, required to decrypt company-wallet keys and encrypted dashboard secrets.
 - `SOURCE_INTERMEDIATE_WALLET_ENCRYPTION_KEY`, required to decrypt source revenue-wallet keys.
 - `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY`, unless the writable payment database is also intentionally migrated.
-- Discord, Helius, Jupiter, session, webhook-auth, and dashboard-password values.
+- Discord, Helius, Jupiter, session, and webhook-auth values.
+
+The dashboard password hash remains in Supabase Edge Function secrets and must not be copied into the VPS `.env`.
 
 Do not email the `.env` or commit it to Git.
 
@@ -82,9 +84,16 @@ On a trusted workstation with the repository:
 npx supabase login
 npx supabase link --project-ref YOUR_PAYMENT_SYSTEM_PROJECT_REF
 npx supabase db push
+npx supabase functions deploy verify-dashboard-password
 ```
 
 This targets the payment-system Supabase project, not the Telegram source project. The source project receives only the read-only role from `SOURCE_DATABASE_RELINK.md`.
+
+Verify that the password secret exists without printing its value:
+
+```powershell
+npx supabase secrets list
+```
 
 ## 5. Start The Frontend Without The Worker
 

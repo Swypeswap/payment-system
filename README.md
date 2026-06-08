@@ -200,10 +200,12 @@ On your trusted Windows workstation:
 ```powershell
 npm install
 npm run generate:secrets
-node ./scripts/hash-password.mjs "THE_GENERATED_DASHBOARD_PASSWORD"
+$hash = node ./scripts/hash-password.mjs "THE_GENERATED_DASHBOARD_PASSWORD"
+npx supabase secrets set "DASHBOARD_PASSWORD_HASH=$hash"
+npx supabase functions deploy verify-dashboard-password
 ```
 
-Store the displayed dashboard password in your password manager. Put only its generated hash in `DASHBOARD_PASSWORD_HASH`.
+Store the displayed dashboard password in your password manager. Its bcrypt hash is stored only in the linked Supabase project's Edge Function secrets. The VPS sends password checks to the protected `verify-dashboard-password` function using its existing service-role credential; the hash is never stored in the VPS environment or returned by the function.
 
 Copy the following generated values into the Ubuntu `.env` file:
 
@@ -211,7 +213,6 @@ Copy the following generated values into the Ubuntu `.env` file:
 MASTER_ENCRYPTION_KEY=
 SESSION_SECRET=
 HELIUS_WEBHOOK_AUTH=
-DASHBOARD_PASSWORD_HASH=
 ```
 
 Fill the remaining Supabase, Discord, Helius, Jupiter, domain, and RPC values from [`.env.example`](./.env.example).
