@@ -16,6 +16,7 @@ import {
   planPrivacyCashDistribution,
   planOwnerPrivacyCashDistribution,
   privacyCashNetFromGross,
+  SourceSecretDecryptionError,
   toHttpsWebsiteUrl,
   validateSolanaWalletAddress
 } from "./index.js";
@@ -42,6 +43,24 @@ test("decrypts Telegram source-wallet v1 AES-GCM blobs", () => {
       key.toString("base64")
     ),
     "base58-private-key"
+  );
+});
+
+test("reports a safe error when the Telegram source-wallet key is wrong", () => {
+  const key = Buffer.alloc(32, 9);
+  const nonce = Buffer.alloc(12, 4);
+  const cipher = createCipheriv("aes-256-gcm", key, nonce);
+  const ciphertext = Buffer.concat([
+    cipher.update("base58-private-key", "utf8"),
+    cipher.final(),
+    cipher.getAuthTag()
+  ]);
+  assert.throws(
+    () => decryptVersionedSourceSecret(
+      `v1:${nonce.toString("base64")}:${ciphertext.toString("base64")}`,
+      Buffer.alloc(32, 8).toString("base64")
+    ),
+    SourceSecretDecryptionError
   );
 });
 

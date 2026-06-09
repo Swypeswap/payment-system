@@ -101,10 +101,19 @@ SOURCE_DATABASE_SSL_REJECT_UNAUTHORIZED=false
 
 ## 4. Restart And Verify
 
-Restart only the worker:
+Build the worker, but do not start its payout loop until the source key has been verified:
 
 ```bash
-docker compose up -d --build worker
+docker compose build worker
+docker compose run --rm --no-deps worker npm run verify:source-key
+```
+
+The verifier decrypts each source wallet in memory, checks that the resulting public key matches `sites.intermediate_wallet`, and prints only a pass/fail count. It never prints a private key or encrypted blob.
+
+Only after verification succeeds, start the worker:
+
+```bash
+docker compose up -d worker
 docker compose logs --tail=200 worker
 ```
 
@@ -133,5 +142,7 @@ Expected errors:
 - `password authentication failed`: verify the role password, project-ref suffix, and URL encoding.
 - `ECONNREFUSED 127.0.0.1:5432`: the environment variable was not loaded or has the wrong name.
 - AES-GCM/decryption failure: the source encryption key does not match the new Telegram project.
+
+When moving to another VPS, stop the old worker before starting the new worker. There must be exactly one active payout worker across all hosts.
 
 Never paste either database password or encryption key into Discord, screenshots, Git, or dashboard fields.

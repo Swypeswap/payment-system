@@ -7,6 +7,7 @@
     "dev": "tsx watch src/index.ts",
     "start": "tsx src/index.ts",
     "register:discord": "tsx src/register-commands.ts",
+    "verify:source-key": "tsx src/verify-source-key.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

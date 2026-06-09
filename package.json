@@ -10,6 +10,7 @@
     "start:server": "npm --prefix apps/server run start",
     "start:worker": "npm --prefix apps/worker run start",
     "register:discord": "npm --prefix apps/worker run register:discord",
+    "verify:source-key": "npm --prefix apps/worker run verify:source-key",
     "install:all": "npm install --no-audit --no-fund && npm --prefix packages/shared install --no-audit --no-fund && npm --prefix apps/server install --install-links --no-audit --no-fund && npm --prefix apps/worker install --install-links --ignore-scripts --no-audit --no-fund",
     "test": "npm --prefix packages/shared run test",
     "typecheck": "npm --prefix packages/shared run typecheck && npm --prefix apps/server run typecheck && npm --prefix apps/worker run typecheck",

@@ -9,6 +9,15 @@ export interface EncryptedValue {
   keyVersion: number;
 }
 
+export class SourceSecretDecryptionError extends Error {
+  constructor() {
+    super(
+      "Source wallet decryption failed: SOURCE_INTERMEDIATE_WALLET_ENCRYPTION_KEY does not match the Telegram database encryption key, or the encrypted blob is corrupted"
+    );
+    this.name = "SourceSecretDecryptionError";
+  }
+}
+
 export function decodeMasterKey(encoded: string): Buffer {
   const key = Buffer.from(encoded, "base64");
   if (key.length !== 32) {
@@ -71,12 +80,16 @@ export function decryptVersionedSourceSecret(
   if (encrypted.length <= 16) {
     throw new Error("Source private key ciphertext is malformed");
   }
-  const decipher = createDecipheriv("aes-256-gcm", key, Buffer.from(nonce, "base64"));
-  decipher.setAuthTag(encrypted.subarray(encrypted.length - 16));
-  return Buffer.concat([
-    decipher.update(encrypted.subarray(0, encrypted.length - 16)),
-    decipher.final()
-  ]).toString("utf8");
+  try {
+    const decipher = createDecipheriv("aes-256-gcm", key, Buffer.from(nonce, "base64"));
+    decipher.setAuthTag(encrypted.subarray(encrypted.length - 16));
+    return Buffer.concat([
+      decipher.update(encrypted.subarray(0, encrypted.length - 16)),
+      decipher.final()
+    ]).toString("utf8");
+  } catch {
+    throw new SourceSecretDecryptionError();
+  }
 }
 
 export function parseSecretKey(input: string): Keypair {

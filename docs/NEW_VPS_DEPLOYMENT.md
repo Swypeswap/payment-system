@@ -122,7 +122,9 @@ Then start exactly one worker on the new VPS:
 
 ```bash
 cd ~/payment-system
-docker compose up -d --build worker
+docker compose build worker
+docker compose run --rm --no-deps worker npm run verify:source-key
+docker compose up -d worker
 docker compose exec worker npm run register:discord
 docker compose logs -f worker
 ```

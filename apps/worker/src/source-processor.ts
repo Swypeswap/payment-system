@@ -2,6 +2,7 @@ import { createHash, randomBytes, randomInt, randomUUID } from "node:crypto";
 import {
   LAMPORTS_PER_SOL,
   PAYOUT_FEE_BUFFER_LAMPORTS,
+  SourceSecretDecryptionError,
   WRAPPED_SOL_MINT,
   decryptSecret,
   decryptVersionedSourceSecret,
@@ -255,6 +256,7 @@ async function createReviewItem(values: {
   message: string;
   severity?: "warning" | "high" | "critical";
   metadata?: Record<string, unknown>;
+  notifyOncePerReason?: boolean;
   routeKind:
     | "unsafe_spl_detected"
     | "awaiting_sol_for_fees"
@@ -274,19 +276,46 @@ async function createReviewItem(values: {
   const result = await db.from("review_required_items").insert(row).select("id").maybeSingle();
   if (result.error?.code === "23505") return false;
   if (result.error) throw new Error(result.error.message);
-  await sendRoute(values.routeKind, {
-    content: values.severity === "critical" ? "@everyone" : undefined,
-    embeds: [{
-      title: "Review required",
-      color: values.severity === "critical" ? 0xff315f : 0xffb15e,
-      fields: [
-        { name: "Wallet", value: values.wallet.address },
-        { name: "Reason", value: values.message }
-      ]
-    }]
-  });
-  await db.from("review_required_items").update({ notified_at: new Date().toISOString() }).eq("id", result.data?.id);
+  let shouldNotify = true;
+  if (values.notifyOncePerReason) {
+    const firstOpen = await db
+      .from("review_required_items")
+      .select("id")
+      .eq("reason_key", values.reasonKey)
+      .eq("status", "open")
+      .order("created_at", { ascending: true })
+      .limit(1)
+      .maybeSingle();
+    if (firstOpen.error) throw new Error(firstOpen.error.message);
+    shouldNotify = firstOpen.data?.id === result.data?.id;
+  }
+  if (shouldNotify) {
+    await sendRoute(values.routeKind, {
+      content: values.severity === "critical" ? "@everyone" : undefined,
+      embeds: [{
+        title: "Review required",
+        color: values.severity === "critical" ? 0xff315f : 0xffb15e,
+        fields: [
+          { name: "Wallet", value: values.wallet.address },
+          { name: "Reason", value: values.message }
+        ]
+      }]
+    });
+    await db.from("review_required_items").update({ notified_at: new Date().toISOString() }).eq("id", result.data?.id);
+  }
   return true;
+}
+
+async function resolveReviewItem(wallet: ExternalRevenueWallet, reasonKey: string) {
+  const now = new Date().toISOString();
+  const result = await db
+    .from("review_required_items")
+    .update({ status: "resolved", resolved_at: now })
+    .eq("wallet_kind", "external_revenue")
+    .eq("external_revenue_wallet_id", wallet.id)
+    .eq("reason_key", reasonKey)
+    .eq("status", "open");
+  if (result.error) throw new Error(result.error.message);
 }
 
 async function recordExternalBalance(wallet: ExternalRevenueWallet, solLamports: bigint, tokenBalances: TokenBalance[]) {
@@ -786,14 +815,16 @@ export async function processExternalRevenueWallet(walletId: string) {
     })
   );
   if (!lock) return;
+  let wallet: ExternalRevenueWallet | null = null;
   try {
-    const wallet = unwrap(
+    wallet = unwrap(
       await db.from("external_revenue_wallets").select("*").eq("id", walletId).single()
     ) as ExternalRevenueWallet;
     if (wallet.mirror_status === "key_erased") return;
     const settings = await loadSettings();
     if (!settings.source_sync_enabled) return;
     const signer = getSourceSigner(wallet);
+    await resolveReviewItem(wallet, "source-private-key-decryption-failed");
     let tokenBalances = await getTokenBalances(signer.publicKey);
     let solLamports = BigInt(await connection.getBalance(signer.publicKey, "confirmed"));
     let solUsdPrice = await recordExternalBalance(wallet, solLamports, tokenBalances);
@@ -839,6 +870,25 @@ export async function processExternalRevenueWallet(walletId: string) {
     }
     await splitRevenueSol(wallet, signer, settings, solLamports, solUsdPrice);
   } catch (error) {
+    if (error instanceof SourceSecretDecryptionError && wallet) {
+      const created = await createReviewItem({
+        wallet,
+        walletKind: "external_revenue",
+        reasonKey: "source-private-key-decryption-failed",
+        message:
+          "The configured Telegram source-wallet encryption key cannot decrypt mirrored wallet keys. Processing is quarantined until the correct source key is installed.",
+        severity: "critical",
+        metadata: { configuration: "SOURCE_INTERMEDIATE_WALLET_ENCRYPTION_KEY" },
+        notifyOncePerReason: true,
+        routeKind: "worker_error"
+      });
+      if (created) {
+        await workerAudit("external_revenue.source_key_invalid", "external_revenue_wallet", walletId, {
+          configuration: "SOURCE_INTERMEDIATE_WALLET_ENCRYPTION_KEY"
+        });
+      }
+      return;
+    }
     await workerAudit("external_revenue.processing_failed", "external_revenue_wallet", walletId, {
       error: error instanceof Error ? error.message : String(error)
     });
