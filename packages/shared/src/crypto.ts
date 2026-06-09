@@ -1,4 +1,4 @@
-import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
+import { createCipheriv, createDecipheriv, randomBytes, webcrypto } from "node:crypto";
 import bs58 from "bs58";
 import { Keypair } from "@solana/web3.js";
 
@@ -64,10 +64,10 @@ export function decryptSecret(
   ]).toString("utf8");
 }
 
-export function decryptVersionedSourceSecret(
+export async function decryptVersionedSourceSecret(
   encryptedBlob: string,
   encodedSourceKey: string
-): string {
+): Promise<string> {
   const [version, nonce, ciphertextWithAuthTag] = encryptedBlob.split(":");
   if (version !== "v1" || !nonce || !ciphertextWithAuthTag) {
     throw new Error("Source private key must use v1:<iv>:<ciphertext> format");
@@ -81,12 +81,19 @@ export function decryptVersionedSourceSecret(
     throw new Error("Source private key ciphertext is malformed");
   }
   try {
-    const decipher = createDecipheriv("aes-256-gcm", key, Buffer.from(nonce, "base64"));
-    decipher.setAuthTag(encrypted.subarray(encrypted.length - 16));
-    return Buffer.concat([
-      decipher.update(encrypted.subarray(0, encrypted.length - 16)),
-      decipher.final()
-    ]).toString("utf8");
+    const cryptoKey = await webcrypto.subtle.importKey(
+      "raw",
+      key,
+      { name: "AES-GCM" },
+      false,
+      ["decrypt"]
+    );
+    const plaintext = await webcrypto.subtle.decrypt(
+      { name: "AES-GCM", iv: Buffer.from(nonce, "base64") },
+      cryptoKey,
+      encrypted
+    );
+    return Buffer.from(plaintext).toString("utf8");
   } catch {
     throw new SourceSecretDecryptionError();
   }

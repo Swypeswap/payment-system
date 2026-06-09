@@ -28,7 +28,7 @@ test("encrypts and decrypts secrets with AES-256-GCM", () => {
   assert.equal(decryptSecret(encrypted, key), "secret-value");
 });
 
-test("decrypts Telegram source-wallet v1 AES-GCM blobs", () => {
+test("decrypts Telegram source-wallet v1 AES-GCM blobs", async () => {
   const key = Buffer.alloc(32, 9);
   const nonce = Buffer.alloc(12, 4);
   const cipher = createCipheriv("aes-256-gcm", key, nonce);
@@ -38,7 +38,7 @@ test("decrypts Telegram source-wallet v1 AES-GCM blobs", () => {
     cipher.getAuthTag()
   ]);
   assert.equal(
-    decryptVersionedSourceSecret(
+    await decryptVersionedSourceSecret(
       `v1:${nonce.toString("base64")}:${ciphertext.toString("base64")}`,
       key.toString("base64")
     ),
@@ -46,7 +46,7 @@ test("decrypts Telegram source-wallet v1 AES-GCM blobs", () => {
   );
 });
 
-test("reports a safe error when the Telegram source-wallet key is wrong", () => {
+test("reports a safe error when the Telegram source-wallet key is wrong", async () => {
   const key = Buffer.alloc(32, 9);
   const nonce = Buffer.alloc(12, 4);
   const cipher = createCipheriv("aes-256-gcm", key, nonce);
@@ -55,7 +55,7 @@ test("reports a safe error when the Telegram source-wallet key is wrong", () => 
     cipher.final(),
     cipher.getAuthTag()
   ]);
-  assert.throws(
+  await assert.rejects(
     () => decryptVersionedSourceSecret(
       `v1:${nonce.toString("base64")}:${ciphertext.toString("base64")}`,
       Buffer.alloc(32, 8).toString("base64")

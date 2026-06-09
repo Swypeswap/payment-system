@@ -172,14 +172,14 @@ function lifecycleToken() {
   return randomBytes(24).toString("base64url");
 }
 
-function getSourceSigner(wallet: ExternalRevenueWallet): Keypair {
+async function getSourceSigner(wallet: ExternalRevenueWallet): Promise<Keypair> {
   if (!env.SOURCE_INTERMEDIATE_WALLET_ENCRYPTION_KEY) {
     throw new Error("SOURCE_INTERMEDIATE_WALLET_ENCRYPTION_KEY is required to sign revenue-wallet transfers");
   }
   if (!wallet.encrypted_private_key_blob) {
     throw new Error("Revenue-wallet encrypted private key has been erased");
   }
-  const secret = decryptVersionedSourceSecret(
+  const secret = await decryptVersionedSourceSecret(
     wallet.encrypted_private_key_blob,
     env.SOURCE_INTERMEDIATE_WALLET_ENCRYPTION_KEY
   );
@@ -823,7 +823,7 @@ export async function processExternalRevenueWallet(walletId: string) {
     if (wallet.mirror_status === "key_erased") return;
     const settings = await loadSettings();
     if (!settings.source_sync_enabled) return;
-    const signer = getSourceSigner(wallet);
+    const signer = await getSourceSigner(wallet);
     await resolveReviewItem(wallet, "source-private-key-decryption-failed");
     let tokenBalances = await getTokenBalances(signer.publicKey);
     let solLamports = BigInt(await connection.getBalance(signer.publicKey, "confirmed"));

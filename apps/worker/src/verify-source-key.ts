@@ -34,7 +34,7 @@ try {
   }
 
   for (const row of result.rows) {
-    const secret = decryptVersionedSourceSecret(
+    const secret = await decryptVersionedSourceSecret(
       row.intermediate_private_key_encrypted,
       env.SOURCE_INTERMEDIATE_WALLET_ENCRYPTION_KEY
     );
