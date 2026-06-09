@@ -1,7 +1,12 @@
 import { hostname } from "node:os";
 import { z } from "zod";
 
-const optionalSecret = z.string().min(1).optional();
+const optionalValue = <T extends z.ZodTypeAny>(schema: T) =>
+  z.preprocess(
+    (value) => typeof value === "string" && value.trim() === "" ? undefined : value,
+    schema.optional()
+  );
+const optionalSecret = optionalValue(z.string().min(1));
 
 const envSchema = z.object({
   SUPABASE_URL: z.string().url(),
@@ -17,8 +22,8 @@ const envSchema = z.object({
   DISCORD_APPLICATION_ID: optionalSecret,
   DISCORD_GUILD_ID: optionalSecret,
   DISCORD_OWNERS_GUILD_ID: optionalSecret,
-  SOURCE_DATABASE_URL: z.string().url().optional(),
-  SOURCE_INTERMEDIATE_WALLET_ENCRYPTION_KEY: z.string().min(40).optional(),
+  SOURCE_DATABASE_URL: optionalValue(z.string().url()),
+  SOURCE_INTERMEDIATE_WALLET_ENCRYPTION_KEY: optionalValue(z.string().min(40)),
   SOURCE_DATABASE_SSL_REJECT_UNAUTHORIZED: z
     .string()
     .default("false")
